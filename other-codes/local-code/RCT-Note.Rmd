@@ -1,0 +1,1151 @@
+---
+title: "Random Control Trail - Sim"
+author: "Huihang Liu"
+date: "5/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+See 2021-04-27-RCT.markdown for details. 
+
+Here we conduct simulation studies. 
+
+## Bloniarza et. al. (2017)
+
+Here we list the settings used in Bloniarza et. al. (2017). 
+
+Methods: CV-Lasso, OLS, CV-(Lasso+OLS)
+
+In the following chunk, we generate data onec for random sampling. 
+```{r, eval=FALSE}
+# data X, beta_t, beta_c, Z, e_t, e_c
+# this will only run once during the whole simulation study
+rm(list=ls())
+
+set.seed(1000)  # 1001 default
+
+n = 250   # n_c + n_t 
+p = 50    # 50 or 500
+
+s = 10    # number of non-zero coefficients of X.
+rho = 0   # 0 or 0.6
+c_tuning = 1
+
+Sigma_X = diag(p)
+for (ii in 1:p) {
+  for (jj in 1:p) {
+    if (ii==jj) next
+    Sigma_X[ii,jj] = rho**abs(ii-jj)
+  }
+}
+X <- MASS::mvrnorm(n=n, mu=rep(0,p), Sigma=Sigma_X)
+
+beta_treated_linear_part = stats::rt(n=s, df=3)
+beta_treated_nonlinear_part = 0.1*stats::rt(n=s, df=3)
+beta_control_linear_part = beta_treated_linear_part + stats::rt(n=s, df=3)
+beta_control_nonlinear_part = beta_treated_nonlinear_part + 0.1*stats::rt(n=s, df=3)
+
+error_treated = stats::rnorm(n)
+error_control = stats::rnorm(n)
+Z = MASS::mvrnorm(n=n, mu=rep(0,s), Sigma=Sigma_X[c(1:s), c(1:s)])
+error_treated = error_treated + Z%*%beta_treated_linear_part
+error_control = error_control + Z%*%beta_control_linear_part
+
+y_treated_oracle = X[,1:s] %*% beta_treated_linear_part + exp(X[,1:s] %*% beta_treated_nonlinear_part) + error_treated
+y_control_oracle = X[,1:s] %*% beta_control_linear_part + exp(X[,1:s] %*% beta_control_nonlinear_part) + error_control
+
+ATE_true = mean(y_treated_oracle) - mean(y_control_oracle)
+print(ATE_true)
+```
+
+
+### Random trail and estimations
+
+对上面生成的数据进行随机抽样(不同的处理/控制的分配), 即生成不同的观测样本. 
+
+并且, 将样本代入不同的估计方法中, 得到估计量. 
+
+```{r, eval=FALSE}
+##################################################################################################
+## simulation settings
+rep_num = 25000
+
+n_treated = 100 # 100, 125, or 150
+n_control = n - n_treated
+
+##################################################################################################
+## random control trail
+## randomly assign treated and control group
+idx_treated_sample = sample(1:n, n_treated, replace=FALSE)
+idx_control_sample = setdiff(1:n, idx_treated_sample)
+
+X_treated = X[idx_treated_sample, ]
+X_control = X[idx_control_sample, ]
+y_treated = y_treated_oracle[idx_treated_sample]
+y_control = y_control_oracle[idx_control_sample]
+
+##################################################################################################
+## estimations
+
+# un-adjustment 
+ATE_unadj = mean(y_treated) - mean(y_control)
+
+# OLS estiamte
+X_treated_centered = scale(X_treated, center=TRUE, scale=FALSE)
+X_control_centered = scale(X_control, center=TRUE, scale=FALSE)
+beta_hat_ols_treated = solve(t(X_treated_centered)%*%X_treated_centered)%*%t(X_treated_centered)%*%(y_treated - mean(y_treated))
+beta_hat_ols_control = solve(t(X_control_centered)%*%X_control_centered)%*%t(X_control_centered)%*%(y_control - mean(y_control))
+ATE_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ols_control)
+
+# lasso estimate
+res_cvlasso_tmp = glmnet::cv.glmnet(X_treated_centered, y_treated - mean(y_treated))
+res_cvlasso_treated = glmnet::glmnet(X_treated_centered, y_treated - mean(y_treated), lambda= res_cvlasso_tmp$lambda.min)
+
+res_cvlasso_tmp = glmnet::cv.glmnet(X_control_centered, y_control - mean(y_control))
+res_cvlasso_control = glmnet::glmnet(X_control_centered, y_control - mean(y_control), lambda= res_cvlasso_tmp$lambda.min)
+
+ATE_cvlasso = as.numeric((mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%res_cvlasso_treated$beta) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%res_cvlasso_control$beta))
+
+#` A modela avaraging for lasso is un-necessary
+
+#` # Model averaging + Lasso + OLS
+#` # see following
+```
+
+### MMA(Lasso + OLS)
+
+下面是 MMA 的 ATE 的代码. 比较原始, 
+```{r, eval=FALSE}
+## Some useful functions
+
+# Re-estimate lasso solution path by OLS
+ols_estimate <- function (lasso_estimate, xx, yy) {
+  # note: lasso_estimate should be a matrix or array, not a sparse matrix
+  new_estimate = rep(0, dim(xx)[2])
+  idx_of_support_of_beta = which(lasso_estimate != 0)
+  if (length(idx_of_support_of_beta) == 0) return(new_estimate)
+  X_new = xx[, idx_of_support_of_beta]
+  tmp_estimate = solve(t(X_new) %*% X_new) %*% t(X_new) %*% yy
+  new_estimate[idx_of_support_of_beta] = tmp_estimate
+  return(new_estimate)
+}
+
+# Remove repeated columns in an array
+remove_repeated_columns <- function(input_array) {
+  num_cols = dim(input_array)[2]
+  
+  if (num_cols == 0) {
+    warning("Error length of my input_array!")
+    return(0)
+  }
+  
+  output_array = input_array[,1]
+  if (num_cols == 1) return(output_array)
+  
+  ii = 2
+  while (ii <= num_cols) {
+    a_tmp = which(input_array[,ii] != 0)
+    b_tmp = which(input_array[,ii-1] != 0)
+    if (length(a_tmp) == length(b_tmp)){
+      ii = ii + 1
+      next
+    } else {
+      output_array = cbind(output_array, input_array[,ii])
+      ii = ii + 1
+      next
+    }
+  }
+  return(output_array)
+}
+
+# treated group
+res_lasso = glmnet::glmnet(X_treated_centered, y_treated - mean(y_treated))
+beta_hat_lasso_path_treated = as.matrix(res_lasso$beta) # size: p*num_model
+num_models_treated = dim(beta_hat_lasso_path_treated)[2]
+beta_hat_ols_path_treated = sapply(1:num_models_treated, function(ii) ols_estimate(beta_hat_lasso_path_treated[,ii], X_treated_centered, y_treated - mean(y_treated)))
+beta_hat_ols_path_treated_deduplication = remove_repeated_columns(beta_hat_ols_path_treated)
+num_models_treated = dim(beta_hat_ols_path_treated_deduplication)[2]    # de-duplicatation
+num_variables_in_models = sapply(1:num_models_treated, function(ii) {length(which(beta_hat_ols_path_treated_deduplication[,ii]!=0))})
+sigma2_hat_treated = norm(y_treated - mean(y_treated) - X_treated_centered %*% beta_hat_ols_path_treated_deduplication[,num_models_treated], '2') / (n_treated - num_variables_in_models[num_models_treated])               # the residual / dof (bigest model) # nolint
+U_treated = X_treated_centered %*% beta_hat_ols_path_treated_deduplication               # mean values, n*num_models
+# Qudratic programming
+Dmat_t = t(U_treated) %*% U_treated + diag(num_models_treated)*1e-6                 # prevent from semi-defintion
+dvec_t = t(y_treated - mean(y_treated)) %*% U_treated - 2*sigma2_hat_treated*num_variables_in_models
+Amat_t = cbind(matrix(1,num_models_treated,1), diag(rep(1,num_models_treated)), -1*diag(rep(1,num_models_treated)))
+bvec_t = rbind(1, matrix(0,num_models_treated,1), -1*matrix(1,num_models_treated,1))
+quadprog_solution = quadprog::solve.QP(Dmat=Dmat_t, dvec=dvec_t, Amat=Amat_t, bvec=bvec_t, meq=1)
+weight_hat_treated = quadprog_solution$solution*(quadprog_solution$solution>1e-6)
+beta_hat_mma_lasso_ols_treated = beta_hat_ols_path_treated_deduplication %*% weight_hat_treated
+
+
+# control group
+res_lasso = glmnet::glmnet(X_control_centered, y_control - mean(y_control))
+beta_hat_lasso_path_control = as.matrix(res_lasso$beta) # size: p*num_model
+num_models_control = dim(beta_hat_lasso_path_control)[2]
+beta_hat_ols_path_control = sapply(1:num_models_control, function(ii) ols_estimate(beta_hat_lasso_path_control[,ii], X_control_centered, y_control - mean(y_control)))
+beta_hat_ols_path_control_deduplication = remove_repeated_columns(beta_hat_ols_path_control)
+num_models_control = dim(beta_hat_ols_path_control_deduplication)[2]    # de-duplicatation
+num_variables_in_models = sapply(1:num_models_control, function(ii) {length(which(beta_hat_ols_path_control_deduplication[,ii]!=0))})
+sigma2_hat_control = norm(y_control - mean(y_control) - X_control_centered %*% beta_hat_ols_path_control_deduplication[,num_models_control], '2') / (n_control - num_variables_in_models[num_models_control])               # the residual / dof (bigest model)
+U_control = X_control_centered %*% beta_hat_ols_path_control_deduplication               # mean values, n*num_models
+# Qudratic programming
+Dmat_c = t(U_control) %*% U_control + diag(num_models_control)*1e-6                 # prevent from semi-defintion
+dvec_c = t(y_control - mean(y_control)) %*% U_control - 2*sigma2_hat_control*num_variables_in_models
+Amat_c = cbind(matrix(1,num_models_control,1), diag(rep(1,num_models_control)), -1*diag(rep(1,num_models_control)))
+bvec_c = rbind(1, matrix(0,num_models_control,1), -1*matrix(1,num_models_control,1))
+quadprog_solution = quadprog::solve.QP(Dmat=Dmat_c, dvec=dvec_c, Amat=Amat_c, bvec=bvec_c, meq=1)
+weight_hat_control = quadprog_solution$solution*(quadprog_solution$solution>1e-6)
+beta_hat_mma_lasso_ols_control = beta_hat_ols_path_control_deduplication %*% weight_hat_control
+
+ATE_mma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_mma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_mma_lasso_ols_control)
+```
+
+这里, 将上面的代码使用函数重写一遍, 减少重复的代码. (内容完全保持一致)
+
+```{r, eval=FALSE}
+# Re-estimate lasso solution path by OLS
+ols_estimate <- function (lasso_estimate, xx, yy) {
+  # note: lasso_estimate should be a matrix or array, not a sparse matrix
+  new_estimate = rep(0, dim(xx)[2])
+  idx_of_support_of_beta = which(lasso_estimate != 0)
+  if (length(idx_of_support_of_beta) == 0) return(new_estimate)
+  X_new = xx[, idx_of_support_of_beta]
+  tmp_estimate = solve(t(X_new) %*% X_new) %*% t(X_new) %*% yy
+  new_estimate[idx_of_support_of_beta] = tmp_estimate
+  return(new_estimate)
+}
+
+# Remove repeated columns from an array
+remove_repeated_columns <- function(input_array) {
+  num_cols = dim(input_array)[2]
+  
+  if (num_cols == 0) {
+    warning("Error length of my input_array!")
+    return(0)
+  }
+  
+  output_array = input_array[,1]
+  if (num_cols == 1) return(output_array)
+  
+  ii = 2
+  while (ii <= num_cols) {
+    a_tmp = which(input_array[,ii] != 0)
+    b_tmp = which(input_array[,ii-1] != 0)
+    if (length(a_tmp) == length(b_tmp)){
+      ii = ii + 1
+      next
+    } else {
+      output_array = cbind(output_array, input_array[,ii])
+      ii = ii + 1
+      next
+    }
+  }
+  return(output_array)
+}
+
+# mma(lasso+ols)
+mma_lasso_ols <- function(X_centered, y) {
+  res_lasso = glmnet::glmnet(X_centered, y - mean(y))
+  beta_hat_lasso_path = as.matrix(res_lasso$beta) # size: p*num_model
+  num_models = dim(beta_hat_lasso_path)[2]
+  beta_hat_ols_path = sapply(1:num_models, function(ii) ols_estimate(beta_hat_lasso_path[,ii], X_centered, y - mean(y)))
+  beta_hat_ols_path_deduplication = remove_repeated_columns(beta_hat_ols_path)
+  num_models = dim(beta_hat_ols_path_deduplication)[2]    # de-duplicatation
+  num_variables_in_models = sapply(1:num_models, function(ii) {length(which(beta_hat_ols_path_deduplication[,ii]!=0))})
+  sigma2_hat = norm(y - mean(y) - X_centered %*% beta_hat_ols_path_deduplication[,num_models], '2') / (n - num_variables_in_models[num_models])               # the residual / dof (bigest model)
+  U = X_centered %*% beta_hat_ols_path_deduplication               # mean values, n*num_models
+  # Qudratic programming
+  Dmat_t = t(U) %*% U + diag(num_models)*1e-6                 # prevent from semi-defintion
+  dvec_t = t(y - mean(y)) %*% U - 2*sigma2_hat*num_variables_in_models
+  Amat_t = cbind(matrix(1,num_models,1), diag(rep(1,num_models)), -1*diag(rep(1,num_models)))
+  bvec_t = rbind(1, matrix(0,num_models,1), -1*matrix(1,num_models,1))
+  quadprog_solution = quadprog::solve.QP(Dmat=Dmat_t, dvec=dvec_t, Amat=Amat_t, bvec=bvec_t, meq=1)
+  weight_hat = quadprog_solution$solution*(quadprog_solution$solution>1e-6)
+  beta_hat_mma_lasso_ols = beta_hat_ols_path_deduplication %*% weight_hat
+  return(beta_hat_mma_lasso_ols)
+}
+
+# treated group
+beta_hat_mma_lasso_ols_treated = mma_lasso_ols(X_treated_centered, y_treated)
+# control group
+beta_hat_mma_lasso_ols_control = mma_lasso_ols(X_control_centered, y_control)
+# ATE
+ATE_mma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_mma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_mma_lasso_ols_control)
+```
+
+下面是新的 MA 方法的尝试: cvma(lasso+ols)
+
+```{r, eval=FALSE}
+# cvma(lasso+ols)
+cv_ma_lasso_ols <- function(x_input, y_input, smooth=TRUE) {
+  # input: x and y
+  # param smooth: if true, we use model averagin; if not, we use model selection method
+  # output: model averaging beta_hat 
+  # 在 lasso 中, 需要使用固定的 lambda, 否则在循环中可能会有不同的 lambda, 导致问题
+
+  lasso_path_from_glmnet = glmnet::glmnet(x_input, y_input)
+  lambda_path_from_glmnet = lasso_path_from_glmnet$lambda
+  beta_hat_in_lasso_path_from_glmnet = as.matrix(lasso_path_from_glmnet$beta) # size: p*num_model
+  num_models = length(lambda_path_from_glmnet)
+  beta_hat_in_ols_path_from_glmnet_deduplicated = remove_repeated_columns(beta_hat_in_lasso_path_from_glmnet)
+  num_models = dim(beta_hat_in_ols_path_from_glmnet_deduplicated)[2]          # de-duplicatation
+
+  # estimated mean value: arranged by column
+  U = x_input %*% beta_hat_in_ols_path_from_glmnet_deduplicated               # size: n*num_model
+
+  # CV procedure
+  CV_fold = 10                                        # 10, dim(x_input)[1] 10-fold or Jackknife
+  CV_size_group = floor(dim(x_input)[1] / CV_fold)
+  cv_loss <- rep(0, num_models)
+  XB = matrix(0, CV_size_group, num_models)
+  YXB = matrix(0, num_models, 1)
+  for (kk in 1:CV_fold) {
+    #` CV split
+    #` train set and valid set
+    x_train <- x_input[-c(((kk-1)*CV_size_group+1):(kk*CV_size_group)), ]  
+    y_train <- y_input[-c(((kk-1)*CV_size_group+1):(kk*CV_size_group))]
+    x_valid <- x_input[c(((kk-1)*CV_size_group+1):(kk*CV_size_group)), ]
+    y_valid <- y_input[c(((kk-1)*CV_size_group+1):(kk*CV_size_group))]
+
+    # train and evaluate
+    for (mm in 1:num_models) {
+      # estimate beta
+      res_lasso_tmp = glmnet::glmnet(x_train, y_train, lambda=lambda_path_from_glmnet[mm])
+      beta_hat_lasso_tmp = as.matrix(res_lasso_tmp$beta)
+      beta_hat_ols_tmp = ols_estimate(beta_hat_lasso_tmp, x_train, y_train)
+      # obtain loss
+      cv_loss[mm] = cv_loss[mm] + norm(x_valid%*%beta_hat_ols_tmp - y_valid, '2')
+      XB[,mm] = XB[,mm] + as.matrix(x_valid%*%beta_hat_ols_tmp)
+      YXB[mm] = YXB[mm] + y_valid%*%as.matrix(x_valid%*%beta_hat_ols_tmp)
+    }
+  }
+
+  if (smooth == FALSE) {
+    # model selection
+    idx_min_cv_loss = which.min(cv_loss)
+    lambda_min_cv_loss = lambda_path_from_glmnet[idx_min_cv_loss]
+    res_lasso_tmp = glmnet::glmnet(x_input, y_input, lambda=lambda_min_cv_loss)
+    beta_hat_cv_lasso = as.matrix(res_lasso_tmp$beta)
+    beta_hat_cv_lasso_ols = ols_estimate(beta_hat_cv_lasso, x_input, y_input)
+    return(beta_hat_cv_lasso_ols)
+  } else {
+    # model averaging
+    Dmat_t = t(XB) %*% XB + diag(num_models)*1e-6             # prevent from semi-definition
+    dvec_t = YXB
+    Amat_t = cbind(matrix(1,num_models,1), diag(rep(1,num_models)), -1*diag(rep(1,num_models)))
+    bvec_t = rbind(1, matrix(0,num_models,1), -1*matrix(1,num_models,1))
+    quadprog_solution = quadprog::solve.QP(Dmat=Dmat_t, dvec=dvec_t, Amat=Amat_t, bvec=bvec_t, meq=1)
+    weight_hat = quadprog_solution$solution*(quadprog_solution$solution>1e-6)
+    beta_hat_cv_ma_lasso_ols = beta_hat_in_ols_path_from_glmnet_deduplicated %*% weight_hat
+    return(beta_hat_cv_ma_lasso_ols)
+  }
+}
+
+# treated group
+beta_hat_cv_ma_lasso_ols_treated = cv_ma_lasso_ols(X_treated_centered, y_treated - mean(y_treated), smooth=TRUE)
+# control group
+beta_hat_cv_ma_lasso_ols_control = cv_ma_lasso_ols(X_control_centered, y_control - mean(y_control), smooth=TRUE)
+# ATE
+ATE_cv_ma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_cv_ma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_cv_ma_lasso_ols_control)
+```
+
+### Simulation
+
+下面开始进行随机抽样的模拟实验, 在 lasso 的 design 下. 
+运行下面的 Simulation, 不需要运行上面的代码, 我已经将代码写入 algorithms_0.1.r 中, 每次模拟都调用该文件中的算法. 
+
+```{r, eval=FALSE}
+simulate_once <- function(ii) {
+  # load necessary functions for mma and cv-ma
+  source('algorithms_0.1.r')
+  set.seed(ii)
+
+  # some important variables
+  n_treated = n / 2 # 100, 125, or 150
+  n_control = n - n_treated
+
+  # randomize
+  idx_treated_sample = sample(1:n, n_treated, replace=FALSE)
+  idx_control_sample = setdiff(1:n, idx_treated_sample); 
+
+  X_treated = X[idx_treated_sample, ]
+  X_control = X[idx_control_sample, ]
+  y_treated = y_treated_oracle[idx_treated_sample]
+  y_control = y_control_oracle[idx_control_sample]
+
+  X_treated_centered = scale(X_treated, center=TRUE, scale=FALSE)
+  X_control_centered = scale(X_control, center=TRUE, scale=FALSE)
+  y_treated_centered = y_treated - mean(y_treated)
+  y_control_centered = y_control - mean(y_control)
+
+  #################################################
+  ## Estimation
+
+  # method 1: un-adjustment 
+  ATE_unadj = mean(y_treated) - mean(y_control)
+
+  # method 2: OLS estiamte
+  if (min(n_treated, n_control) > p) {
+    beta_hat_ols_treated = solve(t(X_treated_centered)%*%X_treated_centered)%*%t(X_treated_centered)%*%(y_treated_centered)
+    beta_hat_ols_control = solve(t(X_control_centered)%*%X_control_centered)%*%t(X_control_centered)%*%(y_control_centered)
+    ATE_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ols_control)
+  }
+
+  # # method 3: cv(lasso) by glmnet
+  # res_cvlasso_tmp = glmnet::cv.glmnet(X_treated_centered, y_treated_centered)
+  # res_cvlasso_treated = glmnet::glmnet(X_treated_centered, y_treated_centered, lambda= res_cvlasso_tmp$lambda.min)
+  # res_cvlasso_tmp = glmnet::cv.glmnet(X_control_centered, y_control_centered)
+  # res_cvlasso_control = glmnet::glmnet(X_control_centered, y_control_centered, lambda= res_cvlasso_tmp$lambda.min)
+  # ATE_cvlasso = as.numeric((mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%res_cvlasso_treated$beta) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%res_cvlasso_control$beta))
+
+  # method 3' cv(lasso) by hand
+  beta_hat_cv_ms_lasso_treated = cv_ma_lasso_ols(X_treated_centered, y_treated_centered, refit=FALSE, smooth=FALSE)
+  beta_hat_cv_ms_lasso_control = cv_ma_lasso_ols(X_control_centered, y_control_centered, refit=FALSE, smooth=FALSE)
+  ATE_cv_ms_lasso = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_cv_ms_lasso_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_cv_ms_lasso_control)
+
+  # method 4: cv(lasso+ols) by hand
+  beta_hat_cv_ms_lasso_ols_treated = cv_ma_lasso_ols(X_treated_centered, y_treated_centered, refit=TRUE, smooth=FALSE)
+  beta_hat_cv_ms_lasso_ols_control = cv_ma_lasso_ols(X_control_centered, y_control_centered, refit=TRUE, smooth=FALSE)
+  ATE_cv_ms_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_cv_ms_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_cv_ms_lasso_ols_control)
+
+  # method 5: mma(lasso+ols)
+  beta_hat_mma_lasso_ols_treated = mma_lasso_ols(X_treated_centered, y_treated_centered)   # treated group
+  beta_hat_mma_lasso_ols_control = mma_lasso_ols(X_control_centered, y_control_centered)   # control group
+  ATE_mma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_mma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_mma_lasso_ols_control)
+
+  # # method 6: cvma(lasso+ols)
+  # beta_hat_cv_ma_lasso_ols_treated = cv_ma_lasso_ols(X_treated_centered, y_treated_centered, refit=TRUE, smooth=TRUE)
+  # beta_hat_cv_ma_lasso_ols_control = cv_ma_lasso_ols(X_control_centered, y_control_centered, refit=TRUE, smooth=TRUE)
+  # ATE_cv_ma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_cv_ma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_cv_ma_lasso_ols_control)
+
+  # # method 6' leave-one-out cv
+  # beta_hat_loocv_ma_lasso_ols_treated = cv_ma_lasso_ols(X_treated_centered, y_treated_centered, refit=TRUE, smooth=TRUE, CV_fold=n_treated)
+  # beta_hat_loocv_ma_lasso_ols_control = cv_ma_lasso_ols(X_control_centered, y_control_centered, refit=TRUE, smooth=TRUE, CV_fold=n_control)
+  # ATE_loocv_ma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_loo cv_ma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_loocv_ma_lasso_ols_control)
+
+  # record the estimates into an array
+  if (min(n_treated, n_control) > p) {
+    res_ATE_methods = c(ATE_unadj, ATE_ols, ATE_cv_ms_lasso, ATE_cv_ms_lasso_ols, ATE_mma_lasso_ols) # ATE_cv_ma_lasso_ols, ATE_loocv_ma_lasso_ols
+  } else {
+    res_ATE_methods = c(ATE_unadj, ATE_cv_ms_lasso, ATE_cv_ms_lasso_ols, ATE_mma_lasso_ols, ATE_cv_ma_lasso_ols) # 
+  }
+
+  return(res_ATE_methods)
+
+  
+  # return( c(ATE_unadj, ATE_unadj))  # for debug
+  
+} # simulate_once(1)
+
+# run simulation
+library(parallel) # for detectCores()
+library(snowfall) # parallel programming
+
+sfInit(parallel = TRUE, cpus = 4)
+sfLibrary(glmnet)
+sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle")
+
+rep_num <- 100 # 5000
+res_rep_simulation = sfSapply(1:rep_num, simulate_once)
+res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
+sfStop()
+
+# analysis the results
+bias_method = colMeans(res_rep_simulation) - ATE_true
+sds_method = apply(res_rep_simulation, 2, sd)
+MSE_method = apply(res_rep_simulation - ATE_true, 2, function(x) norm(x, "2")^2/rep_num)
+print(bias_method)
+print(sds_method)
+print(MSE_method)
+```
+
+下面绘制 boxplot
+
+```{r, eval=FALSE}
+# res = data.frame(res_rep_simulation-ATE_true)
+
+boxplot(c+0.2118804, names = c("Un-adj","ols","cv(lasso)","cv(lasso+ols)","mma(lasso+ols)","cv(lasso+ols+ma)"),col = colors()[c(1,2,3,4,10,11)], main=bquote("Boxplot with Standard Deviation on top ("~ n[T] == 100 ~"and"~ p == 50 ~")"), ylim=c(-6,6))
+abline(h=0)
+text(x= 1, y= 6, labels= round(sds_method[1], 2))
+text(x= 2, y= 6, labels= round(sds_method[2], 2))
+text(x= 3, y= 6, labels= round(sds_method[3], 2))
+text(x= 4, y= 6, labels= round(sds_method[4], 2))
+text(x= 5, y= 6, labels= round(sds_method[5], 2), col= "red")
+text(x= 6, y= 6, labels= round(sds_method[6], 2), col= "red")
+```
+
+## 新的 Model 重新进行实验
+
+### Some design model averaging used
+
+Hansen (2010) 等文献中常用的方法. 由于去掉了稀疏性约束, 变量选择方法可能失效? 
+尝试这种 settings 的理由是: 考虑单个回归的 MSE, MMA 以及 MA-CV 可以做的比其他方法好; 因此我们自然可以期望考虑两个回归的差值可以做的比其他方法好. 
+
+与 Hansen (2010) 等传统的单个回归的模型平均的问题不同的是, 这里面对的是两个回归问题. 两个回归的关系, 我们暂时没有假设. 按照上一个 Design, 两个回归具有完全不同的系数. 
+
+下面为了方便, 我在两个回归中使用了相同的系数. (会有什么好处吗?)
+
+下面, 我们随机生成一次数据. 
+```{r, eval=FALSE}
+set.seed(1000)
+
+# DGP
+n = 200   # n_c + n_t 
+p = 200    # 50 or 500
+
+rho = 0   # 0 or 0.6 # control the correlation of X
+c_tuning = 1  # control the scale of beta
+alpha_tuning = 0.1  # control the decay of beta
+
+Sigma_X = diag(p)
+for (ii in 1:(p)) {
+  for (jj in 1:(p)) {
+    if (ii==jj) next
+    Sigma_X[ii,jj] = rho**abs(ii-jj)
+  }
+}
+X <- MASS::mvrnorm(n=n, mu=rep(0,p), Sigma=Sigma_X)   # no interception in X
+# X <- cbind(X, matrix(0, n, 1))
+
+beta_treated_linear_part = sapply(1:p, function(ii) c_tuning * sqrt(2*alpha_tuning) * ii^(-alpha_tuning-0.5))
+beta_control_linear_part = beta_treated_linear_part
+
+error_treated = stats::rnorm(n)
+error_control = stats::rnorm(n)
+
+y_treated_oracle = X %*% beta_treated_linear_part + error_treated + 1   # ATE = CTE = 1
+y_control_oracle = X %*% beta_control_linear_part + error_control
+
+ATE_true = mean(y_treated_oracle) - mean(y_control_oracle)
+print(ATE_true)
+
+# R-square: the ratio of variance explained by the model
+R2 = var(X %*% beta_treated_linear_part) / var(y_treated_oracle)
+print(R2)
+# v = Reduce("+", sapply(2:p, function(ii) 2*alpha_tuning*(ii**(-2*alpha_tuning-1))))
+# c_tuning_list = sapply(seq(0.1, 0.9, 0.1), function(R2) sqrt((1/(1-R2) - 1) / v))
+```
+
+
+下面的代码块是进行一次模拟实验的函数, 输入种子, 输出不同方法估计的 ATE.
+```{r, eval=FALSE}
+simulate_once <- function(ii) {
+  set.seed(2024+ii)
+  source('algorithms_0.1.r')
+
+  # some important variables
+  n_treated = n / 2 # 100, 125, or 150
+  n_control = n - n_treated
+
+  # randomize
+  idx_treated_sample = sample(1:n, n_treated, replace=FALSE)
+  idx_control_sample = setdiff(1:n, idx_treated_sample)
+
+  X_treated = X[idx_treated_sample, ]
+  X_control = X[idx_control_sample, ]
+  y_treated = y_treated_oracle[idx_treated_sample]
+  y_control = y_control_oracle[idx_control_sample]
+
+  X_treated_centered = scale(X_treated, center=TRUE, scale=FALSE)
+  X_control_centered = scale(X_control, center=TRUE, scale=FALSE)
+  y_treated_centered = y_treated - mean(y_treated)
+  y_control_centered = y_control - mean(y_control)
+
+  mean_value_oracal_treated = X_treated_centered %*% beta_treated_linear_part
+  mean_value_oracal_control = X_control_centered %*% beta_control_linear_part
+
+  #################################################
+
+  # method 1: un-adjustment 
+  ATE_unadj = mean(y_treated) - mean(y_control)
+
+  # # method 2: OLS estiamte
+  # beta_hat_ols_treated = solve(t(X_treated_centered)%*%X_treated_centered)%*%t(X_treated_centered)%*%(y_treated_centered)
+  # beta_hat_ols_control = solve(t(X_control_centered)%*%X_control_centered)%*%t(X_control_centered)%*%(y_control_centered)
+  # ATE_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ols_control)
+  
+
+  # our methods
+  beta_hat_mma_hansen_treated = mma_hansen(X_treated_centered, y_treated_centered, 1:floor(3*n_treated^(1/3)))
+  beta_hat_mma_hansen_control = mma_hansen(X_control_centered, y_control_centered, 1:floor(3*n_control^(1/3)))
+  ATE_mma_hansen = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_mma_hansen_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_mma_hansen_control)
+  risk_mma_hansen_treated = norm(mean_value_oracal_treated - X_treated_centered %*% beta_hat_mma_hansen_treated, "2")^2
+
+  # AIC, BIC, S-AIC, S-BIC
+  beta_hat_ms_aic_treated = ma_ic(X_treated_centered, y_treated_centered, 1:floor(3*n_treated^(1/3)), crit='AIC')
+  beta_hat_ms_aic_control = ma_ic(X_control_centered, y_control_centered, 1:floor(3*n_control^(1/3)), crit='AIC')
+  ATE_ms_aic = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ms_aic_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ms_aic_control)
+  risk_ms_aic_treated = norm(mean_value_oracal_treated - X_treated_centered %*% beta_hat_ms_aic_treated, "2")^2
+
+  beta_hat_ms_bic_treated = ma_ic(X_treated_centered, y_treated_centered, 1:floor(3*n_treated^(1/3)), crit='BIC')
+  beta_hat_ms_bic_control = ma_ic(X_control_centered, y_control_centered, 1:floor(3*n_control^(1/3)), crit='BIC')
+  ATE_ms_bic = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ms_bic_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ms_bic_control)
+  risk_ms_bic_treated = norm(mean_value_oracal_treated - X_treated_centered %*% beta_hat_ms_bic_treated, "2")^2
+
+  beta_hat_ma_aic_treated = ma_ic(X_treated_centered, y_treated_centered, 1:floor(3*n_treated^(1/3)), crit='AIC', smooth=TRUE)
+  beta_hat_ma_aic_control = ma_ic(X_control_centered, y_control_centered, 1:floor(3*n_control^(1/3)), crit='AIC', smooth=TRUE)
+  ATE_ma_aic = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ma_aic_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ma_aic_control)
+  risk_ma_aic_treated = norm(mean_value_oracal_treated - X_treated_centered %*% beta_hat_ma_aic_treated, "2")^2
+
+  beta_hat_ma_bic_treated = ma_ic(X_treated_centered, y_treated_centered, 1:floor(3*n_treated^(1/3)), crit='BIC', smooth=TRUE)
+  beta_hat_ma_bic_control = ma_ic(X_control_centered, y_control_centered, 1:floor(3*n_control^(1/3)), crit='BIC', smooth=TRUE)
+  ATE_ma_bic = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_ma_bic_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_ma_bic_control)
+  risk_ma_bic_treated = norm(mean_value_oracal_treated - X_treated_centered %*% beta_hat_ma_bic_treated, "2")^2
+
+  # cv-lasso
+  # lasso estimate
+  res_cvlasso_tmp = glmnet::cv.glmnet(X_treated_centered, y_treated - mean(y_treated))
+  res_cvlasso_treated = glmnet::glmnet(X_treated_centered, y_treated - mean(y_treated), lambda= res_cvlasso_tmp$lambda.min)
+
+  res_cvlasso_tmp = glmnet::cv.glmnet(X_control_centered, y_control - mean(y_control))
+  res_cvlasso_control = glmnet::glmnet(X_control_centered, y_control - mean(y_control), lambda= res_cvlasso_tmp$lambda.min)
+
+  ATE_cvlasso = as.numeric((mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%res_cvlasso_treated$beta) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%res_cvlasso_control$beta))
+  risk_cvlasso_treated = norm(mean_value_oracal_treated - predict(res_cvlasso_treated, X_treated_centered), "2")^2
+
+  # # the minimal risk of candidate models 
+  risk_minimal_candidiate_models_treated = mini_risk_models(X_treated_centered, y_treated_centered, 1:floor(3*n_control^(1/3)), mean_value_oracal_treated)
+  
+  #################################################
+
+  res_ATE_method = c(ATE_unadj, ATE_mma_hansen, ATE_ms_aic, ATE_ms_bic, ATE_ma_aic, ATE_ma_bic, ATE_cvlasso)
+  res_prediction_method = c(risk_mma_hansen_treated, risk_ms_aic_treated, risk_ms_bic_treated, risk_ma_aic_treated, risk_ma_bic_treated)
+  # 只看处理组上的预测风险没有意义. 应该看 ATE 的估计. 
+  # print(res_prediction_method)
+
+  return(res_ATE_method)
+}
+
+simulate_once(1)
+```
+
+在上面给定的设定和数据下, 我们进行重复实验. 
+```{r, eval=FALSE}
+# run simulation
+library(parallel) # for detectCores()
+library(snowfall) # parallel programming
+
+sfInit(parallel = TRUE, cpus = 3)
+sfLibrary(glmnet)
+sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "beta_treated_linear_part", "beta_control_linear_part")
+
+rep_num <- 1000
+res_rep_simulation = sfSapply(1:rep_num, simulate_once)
+res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
+sfStop()
+
+# analysis the results
+bias_method = colMeans(res_rep_simulation) - ATE_true
+sds_method = apply(res_rep_simulation, 2, sd)
+MSE_method = apply(res_rep_simulation - ATE_true, 2, function(x) norm(x, "2")^2/rep_num)
+print(bias_method)
+print(sds_method)
+print(MSE_method)
+```
+
+使用类似与 Zhang (2013) 的代码重写 Hansen (2007) 的模拟设置. 这是一个模型平均用于回归的例子, 不是 ATE 估计的例子. 
+```{r, eval=FALSE}
+MMA_Hansencase <- function(n, alpha, num_rep, rho=0){
+
+  num_models = round(3*(n^(1/3)))         # num of models and variables
+
+  num_variables_models = 1:num_models
+  R2 = seq(0.1, 0.9, 0.05)                # 17 values
+  c = sqrt(R2/(1-R2))
+  beta_tmp = (num_variables_models^(-alpha-0.5)) * sqrt(2*alpha)
+  beta_hat_models = matrix(0, num_models, num_models)
+
+  # recorder
+  Average_Risk_MMA = rep(0, length(R2))
+  Average_Risk_AIC = rep(0, length(R2))
+  Average_Risk_BIC = rep(0, length(R2))
+  Average_Risk_SAIC = rep(0, length(R2))
+  Average_Risk_SBIC = rep(0, length(R2))
+  # loop for 
+  for (current_R2 in 1:length(R2)) {                                    # loop for R2, the length of R2 is 17
+    # some recorder variables for repetition
+    Risk_MMA_rep = rep(0, num_rep)
+    Risk_AIC_rep = rep(0, num_rep)
+    Risk_BIC_rep = rep(0, num_rep)
+    Risk_SAIC_rep = rep(0, num_rep)
+    Risk_SBIC_rep = rep(0, num_rep)
+    Risk_models_rep = matrix(0, num_rep, num_models)
+    
+    # model settings
+    scale_for_error = sqrt(1+(c[current_R2]/((num_models+1)^alpha))^2)  # adj for error term
+    beta = beta_tmp * c[current_R2]                                     # beta
+
+    for (current_rep in 1:num_rep) {
+      # generate data
+      Sigma_X = diag(num_models)
+      for (ii in 1:(num_models)) {
+        for (jj in 1:(num_models)) {
+          if (ii==jj) next
+          Sigma_X[ii,jj] = rho**abs(ii-jj)
+        }
+      }
+      X <- MASS::mvrnorm(n=n, mu=rep(0,num_models), Sigma=Sigma_X)    # no interception in X
+      # X <- cbind(matrix(1, n, 1), X)                                    # the first column if interception
+      e = rnorm(n)
+      mu = X %*% beta
+      Y = mu + e*scale_for_error
+
+      sigma_hat = as.numeric(t(Y) %*% (diag(n) - X %*% solve(t(X)%*%X) %*% t(X)) %*% Y / (n-num_models))  # ??
+
+      # estiamte single model
+      for (j in 1:num_models) {
+        beta_hat_models[1:j, j] = diag(j) %*% solve(t(X[, 1:j]) %*% X[, 1:j]) %*% t(X[, 1:j]) %*% Y
+      }
+
+      mu_hat_models = X %*% beta_hat_models
+      Y_models = matrix(rep(Y, num_models), n, num_models)
+      e_hat = Y_models - mu_hat_models
+      sse_hat = colSums(e_hat^2)
+
+      # MMA
+      Amat_t = cbind(matrix(1, num_models, 1), diag(rep(1, num_models)), -1*diag(rep(1, num_models)))
+      bvec_t = rbind(1, matrix(0, num_models, 1), -1*matrix(1, num_models, 1))
+      Dmat = t(e_hat) %*% e_hat
+      dvec = -num_variables_models*sigma_hat
+      quadprog_solution = quadprog::solve.QP(Dmat=Dmat, dvec=dvec, Amat=Amat_t, bvec=bvec_t, meq=1)
+      ww = quadprog_solution$solution
+      ww = ww*(ww>0); ww = ww/sum(ww)
+      beta_hat_MMA = beta_hat_models %*% ww
+
+      # AIC, SAIC
+      AIC = n * log(sse_hat / n) + num_variables_models*2
+      AIC = AIC - min(AIC)
+      beta_hat_AIC = beta_hat_models[, which.min(AIC)]
+      weights_SAIC = exp(-AIC/2) / sum(exp(-AIC/2))
+      beta_hat_SAIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_models[,ii] * weights_SAIC[ii]))
+      
+      # BIC, SBIC
+      BIC = n * log(sse_hat / n) + num_variables_models*log(n)
+      BIC = BIC - min(BIC)
+      beta_hat_BIC = beta_hat_models[, which.min(BIC)]
+      weights_SBIC = exp(-BIC/2) / sum(exp(-BIC/2))
+      beta_hat_SBIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_models[,ii] * weights_SBIC[ii]))
+      if (current_R2==1 & current_rep==1) print(weights_SBIC)
+
+      # get Risks of methods
+      mu_models = matrix(rep(mu, num_models), n, num_models)
+      Risk_MMA_rep[current_rep] = mean((mu - X %*% beta_hat_MMA)^2)
+      Risk_AIC_rep[current_rep] = mean((mu - X %*% beta_hat_AIC)^2)
+      Risk_BIC_rep[current_rep] = mean((mu - X %*% beta_hat_BIC)^2)
+      Risk_SAIC_rep[current_rep] = mean((mu - X %*% beta_hat_SAIC)^2)
+      Risk_SBIC_rep[current_rep] = mean((mu - X %*% beta_hat_SBIC)^2)
+      Risk_models_rep[current_rep,] = colMeans((mu_models-mu_hat_models)^2)
+    }
+
+    mini_Risk_single_model = min(colMeans(Risk_models_rep))       # this is a strange setting, it chooses the minimal averaged risk. 
+    Average_Risk_MMA[current_R2] = mean(Risk_MMA_rep) / mini_Risk_single_model
+    Average_Risk_AIC[current_R2] = mean(Risk_AIC_rep) / mini_Risk_single_model
+    Average_Risk_BIC[current_R2] = mean(Risk_BIC_rep) / mini_Risk_single_model
+    Average_Risk_SAIC[current_R2] = mean(Risk_SAIC_rep) / mini_Risk_single_model
+    Average_Risk_SBIC[current_R2] = mean(Risk_SBIC_rep) / mini_Risk_single_model
+  }
+
+  # plot.new()
+  ylim_max = max(max(Average_Risk_MMA), max(Average_Risk_AIC), max(Average_Risk_BIC), max(Average_Risk_SAIC), max(Average_Risk_SBIC))
+  ylim_min = min(min(Average_Risk_MMA), min(Average_Risk_AIC), min(Average_Risk_BIC), min(Average_Risk_SAIC), min(Average_Risk_SBIC))
+  plot(seq(0.1, 0.9, 0.05), Average_Risk_MMA, "b", lty=1 ,lwd=2, ylim=c(ylim_min, ylim_max), col='black', main=bquote(n == 50 ~"and"~ alpha == 1), xlab=expression(R^2), ylab="Risk")
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_AIC, "b", lty=2 ,lwd=2, col='blue')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_BIC, "b", lty=3 ,lwd=2, col='green')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SAIC, "b", lty=4 ,lwd=2, col='orange')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SBIC, "b", lty=5 ,lwd=2, col='red')
+  legend("topright",                                    # position
+    legend=c("MMA","AIC","BIC","S-AIC", "S-BIC"),       # name of lines
+    col=c("black","blue","green","orange","red"),       # color
+    lty=1, lwd=2                                        # size
+  )
+
+  output = list()
+  output$mma = Average_Risk_MMA
+  
+  # return(output)
+}
+# MMA_Hansencase(100, 1, 100, 0)   # this looks very well
+# MMA_Hansencase(100, 1, 1000, 0.6) # this looks very well
+```
+
+下面进行处理以及控制组分别回归
+
+```{r, eval=FALSE}
+seed <- 43
+MMA_ATE_Hansencase <- function(n, alpha, num_rep, rho=0){
+  set.seed(seed)
+  n_treated = n / 2 # 100, 125, or 150
+  n_control = n - n_treated
+  num_models = round(3*(n^(1/3)))         # both, num of models and variables
+  num_variables_models = 1:num_models
+  R2 = seq(0.1, 0.9, 0.05)                # 17 values
+  c = sqrt(R2/(1-R2))
+  beta_tmp = (num_variables_models^(-alpha-0.5)) * sqrt(2*alpha)
+
+  # generate data only once
+  Sigma_X = diag(num_models)
+  for (ii in 1:(num_models)) {
+    for (jj in 1:(num_models)) {
+      if (ii==jj) next
+      Sigma_X[ii,jj] = rho**abs(ii-jj)
+    }
+  }
+  X <- MASS::mvrnorm(n=n, mu=rep(0,num_models), Sigma=Sigma_X)    # no interception in X
+  e_treated = rnorm(n)
+  e_control = rnorm(n)
+  # recorder
+  Average_Risk_MMA = rep(0, length(R2)); Average_Risk_AIC = rep(0, length(R2)); Average_Risk_BIC = rep(0, length(R2))
+  Average_Risk_SAIC = rep(0, length(R2)); Average_Risk_SBIC = rep(0, length(R2)); Average_Risk_FULL = rep(0, length(R2))
+  Average_Risk_lasso = rep(0, length(R2))
+  beta_hat_treated_models = matrix(0, num_models, num_models); beta_hat_control_models = matrix(0, num_models, num_models)
+  # loop for 
+  for (current_R2 in 1:length(R2)) {      # loop for R2, the length of R2 is 17
+    # some recorder variables for repetition
+    Risk_MMA_rep = rep(0, num_rep); Risk_AIC_rep = rep(0, num_rep)
+    Risk_BIC_rep = rep(0, num_rep); Risk_SAIC_rep = rep(0, num_rep)
+    Risk_SBIC_rep = rep(0, num_rep); Risk_FULL_rep = rep(0, num_rep)
+    Risk_lasso_rep = rep(0, num_rep)
+    Risk_models_rep = matrix(0, num_rep, num_models)
+    
+    # model settings
+    scale_for_error = sqrt(1+(c[current_R2]/((num_models+1)^alpha))^2)  # adj for error term
+    beta_treated = beta_tmp * c[current_R2]                       # beta
+    beta_control = beta_treated
+    
+    mu_treated = X %*% beta_treated
+    mu_control = X %*% beta_control
+    Y_treated_total = mu_treated + e_treated*scale_for_error + 1
+    Y_control_total = mu_control + e_control*scale_for_error
+    ATE_true = mean(Y_treated_total) - mean(Y_control_total)
+
+    for (current_rep in 1:num_rep) {
+      # randomize
+      idx_treated_sample = sample(1:n, n_treated, replace=FALSE)
+      idx_control_sample = setdiff(1:n, idx_treated_sample)
+
+      X_treated = X[idx_treated_sample, ]
+      X_control = X[idx_control_sample, ]
+      Y_treated = Y_treated_total[idx_treated_sample]
+      Y_control = Y_control_total[idx_control_sample]
+
+      X_treated_centered = scale(X_treated, center=TRUE, scale=FALSE)
+      X_control_centered = scale(X_control, center=TRUE, scale=FALSE)
+      Y_treated_centered = Y_treated - mean(Y_treated)
+      Y_control_centered = Y_control - mean(Y_control)
+
+      mu_oracal_treated = X_treated_centered %*% beta_treated
+      mu_oracal_control = X_control_centered %*% beta_control
+
+      sigma_hat_treated = as.numeric(t(Y_treated) %*% (diag(n_treated) - X_treated_centered %*% solve(t(X_treated_centered)%*%X_treated_centered) %*% t(X_treated_centered)) %*% Y_treated / (n_treated-num_models))
+    
+      # estiamte single model
+      for (j in 1:num_models) {
+        beta_hat_treated_models[1:j, j] = diag(j) %*% solve(t(X_treated_centered[, 1:j]) %*% X_treated_centered[, 1:j]) %*% t(X_treated_centered[, 1:j]) %*% Y_treated
+      }
+
+      mu_hat_treated_models = X_treated_centered %*% beta_hat_treated_models
+      Y_treated_models = matrix(rep(Y_treated, num_models), n_treated, num_models)
+      e_hat_treated = Y_treated_models - mu_hat_treated_models
+      sse_hat_treated = colSums(e_hat_treated^2)
+
+      # MMA
+      Amat_t = cbind(matrix(1, num_models, 1), diag(rep(1, num_models)), -1*diag(rep(1, num_models)))
+      bvec_t = rbind(1, matrix(0, num_models, 1), -1*matrix(1, num_models, 1))
+      Dmat = t(e_hat_treated) %*% e_hat_treated + diag(num_models)*1e-6
+      dvec = -num_variables_models*sigma_hat_treated
+      quadprog_solution = quadprog::solve.QP(Dmat=Dmat, dvec=dvec, Amat=Amat_t, bvec=bvec_t, meq=1)
+      ww = quadprog_solution$solution
+      ww = ww*(ww>0); ww = ww/sum(ww)
+      beta_hat_treated_MMA = beta_hat_treated_models %*% ww
+
+      # AIC, SAIC
+      AIC = n * log(sse_hat_treated / n_treated) + num_variables_models*2
+      AIC = AIC - min(AIC)
+      beta_hat_treated_AIC = beta_hat_treated_models[, which.min(AIC)]
+      weights_SAIC = exp(-AIC/2) / sum(exp(-AIC/2))
+      beta_hat_treated_SAIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_treated_models[,ii] * weights_SAIC[ii]))
+      
+      # BIC, SBIC
+      BIC = n_treated * log(sse_hat_treated / n_treated) + num_variables_models*log(n_treated)
+      BIC = BIC - min(BIC)
+      beta_hat_treated_BIC = beta_hat_treated_models[, which.min(BIC)]
+      weights_SBIC = exp(-BIC/2) / sum(exp(-BIC/2))
+      beta_hat_treated_SBIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_treated_models[,ii] * weights_SBIC[ii]))
+
+      # FULL
+      beta_hat_treated_FULL = beta_hat_treated_models[, num_models]
+
+      # lasso
+      res_cvlasso_tmp = glmnet::cv.glmnet(X_treated_centered, Y_treated - mean(Y_treated), intercept=FALSE)
+      res_cvlasso_treated = glmnet::glmnet(X_treated_centered, Y_treated - mean(Y_treated), lambda= res_cvlasso_tmp$lambda.min, intercept=FALSE)
+      res_cvlasso_tmp = glmnet::cv.glmnet(X_control_centered, Y_control - mean(Y_control), intercept=FALSE)
+      res_cvlasso_control = glmnet::glmnet(X_control_centered, Y_control - mean(Y_control), lambda= res_cvlasso_tmp$lambda.min, intercept=FALSE)
+      ATE_cvlasso = as.numeric((mean(Y_treated) - t(colMeans(X_treated) - colMeans(X))%*%res_cvlasso_treated$beta) - (mean(Y_control) - t(colMeans(X_control) - colMeans(X))%*%res_cvlasso_control$beta))
+
+      # for control
+      sigma_hat_control = as.numeric(t(Y_control) %*% (diag(n_control) - X_control_centered %*% solve(t(X_control_centered)%*%X_control_centered) %*% t(X_control_centered)) %*% Y_control / (n_control-num_models))
+    
+      # estiamte single model
+      for (j in 1:num_models) {
+        beta_hat_control_models[1:j, j] = diag(j) %*% solve(t(X_control_centered[, 1:j]) %*% X_control_centered[, 1:j]) %*% t(X_control_centered[, 1:j]) %*% Y_control
+      }
+
+      mu_hat_control_models = X_control_centered %*% beta_hat_control_models
+      Y_control_models = matrix(rep(Y_control, num_models), n_control, num_models)
+      e_hat_control = Y_control_models - mu_hat_control_models
+      sse_hat_control = colSums(e_hat_control^2)
+
+      # MMA
+      Amat_t = cbind(matrix(1, num_models, 1), diag(rep(1, num_models)), -1*diag(rep(1, num_models)))
+      bvec_t = rbind(1, matrix(0, num_models, 1), -1*matrix(1, num_models, 1))
+      Dmat = t(e_hat_control) %*% e_hat_control + diag(num_models)*1e-6
+      dvec = -num_variables_models*sigma_hat_control
+      quadprog_solution = quadprog::solve.QP(Dmat=Dmat, dvec=dvec, Amat=Amat_t, bvec=bvec_t, meq=1)
+      ww = quadprog_solution$solution
+      ww = ww*(ww>0); ww = ww/sum(ww)
+      beta_hat_control_MMA = beta_hat_control_models %*% ww
+
+      # AIC, SAIC
+      AIC = n * log(sse_hat_control / n_control) + num_variables_models*2
+      AIC = AIC - min(AIC)
+      beta_hat_control_AIC = beta_hat_control_models[, which.min(AIC)]
+      weights_SAIC = exp(-AIC/2) / sum(exp(-AIC/2))
+      beta_hat_control_SAIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_control_models[,ii] * weights_SAIC[ii]))
+      
+      # BIC, SBIC
+      BIC = n_control * log(sse_hat_control / n_control) + num_variables_models*log(n_control)
+      BIC = BIC - min(BIC)
+      beta_hat_control_BIC = beta_hat_control_models[, which.min(BIC)]
+      weights_SBIC = exp(-BIC/2) / sum(exp(-BIC/2))
+      beta_hat_control_SBIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_control_models[,ii] * weights_SBIC[ii]))
+
+      # FULL
+      beta_hat_control_FULL = beta_hat_control_models[, num_models]
+
+      # ATE estimates
+      ATE_hat_unadj = mean(Y_treated) - mean(Y_control)
+      ATE_hat_lasso = ATE_cvlasso
+      ATE_hat_MMA = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_MMA) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_MMA)
+      ATE_hat_AIC = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_AIC) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_AIC)
+      ATE_hat_BIC = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_BIC) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_BIC)
+      ATE_hat_SAIC = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_SAIC) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_SAIC)
+      ATE_hat_SBIC = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_SBIC) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_SBIC)
+      ATE_hat_FULL = (mean(Y_treated) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_FULL) - (mean(Y_control) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_FULL)
+      ATE_hat_models = (colMeans(Y_treated_models) - (colMeans(X_treated) - colMeans(X))%*%beta_hat_treated_models) - (colMeans(Y_control_models) - (colMeans(X_control) - colMeans(X))%*%beta_hat_control_models)
+      # print(ATE_hat_models)
+
+      # get Risks of methods (MSE of Estimates)
+      ATE_true_models = rep(ATE_true, num_models)
+      Risk_MMA_rep[current_rep] = (ATE_true - ATE_hat_MMA)^2
+      Risk_AIC_rep[current_rep] = (ATE_true - ATE_hat_AIC)^2
+      Risk_BIC_rep[current_rep] = (ATE_true - ATE_hat_BIC)^2
+      Risk_SAIC_rep[current_rep] = (ATE_true - ATE_hat_SAIC)^2
+      Risk_SBIC_rep[current_rep] = (ATE_true - ATE_hat_SBIC)^2
+      Risk_FULL_rep[current_rep] = (ATE_true - ATE_hat_FULL)^2
+      Risk_models_rep[current_rep,] = (ATE_true_models-ATE_hat_models)^2
+      Risk_lasso_rep[current_rep] = (ATE_true - ATE_hat_lasso)^2
+    }
+
+    mini_Risk_single_model = min(colMeans(Risk_models_rep))       # this is a strange setting, it chooses the minimal averaged risk. 
+    Average_Risk_MMA[current_R2] = mean(Risk_MMA_rep) / mini_Risk_single_model
+    Average_Risk_AIC[current_R2] = mean(Risk_AIC_rep) / mini_Risk_single_model
+    Average_Risk_BIC[current_R2] = mean(Risk_BIC_rep) / mini_Risk_single_model
+    Average_Risk_SAIC[current_R2] = mean(Risk_SAIC_rep) / mini_Risk_single_model
+    Average_Risk_SBIC[current_R2] = mean(Risk_SBIC_rep) / mini_Risk_single_model
+    Average_Risk_FULL[current_R2] = mean(Risk_FULL_rep) / mini_Risk_single_model
+    Average_Risk_lasso[current_R2] = mean(Risk_lasso_rep) / mini_Risk_single_model
+  }
+
+  # plot.new()
+  file_name = paste("output/ate_", n, "_", alpha, "_", rho, "_", num_rep, "_", seed, ".pdf", sep='')
+  pdf(file_name, width=6,height=6)
+  ylim_max = max(max(Average_Risk_MMA), max(Average_Risk_AIC), max(Average_Risk_BIC), max(Average_Risk_SAIC), max(Average_Risk_SBIC), max(Average_Risk_FULL))
+  ylim_min = min(min(Average_Risk_MMA), min(Average_Risk_AIC), min(Average_Risk_BIC), min(Average_Risk_SAIC), min(Average_Risk_SBIC), min(Average_Risk_FULL))
+  plot(seq(0.1, 0.9, 0.05), Average_Risk_MMA, type="o", lty=1, pch=0, lwd=2, ylim=c(ylim_min, ylim_max), col='black', main=bquote(n == .(n) ~","~ alpha == .(alpha) ~"and"~ rho == .(rho)), xlab=expression(R^2), ylab="Risk")
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_AIC, type="b", lty=2, pch=2, lwd=2, col='blue')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_BIC, type="b", lty=3, pch=4, lwd=2, col='green')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SAIC, type="b", lty=4, pch=6, lwd=2, col='orange')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SBIC, type="b", lty=5, pch=8, lwd=2, col='red')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_FULL, type="b", lty=6, pch=10, lwd=2, col='darkred')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_lasso, type="b", lty=7, pch=12, lwd=2, col='purple')
+  legend("topright",                                    # position
+    legend=c("MMA","AIC","BIC","S-AIC", "S-BIC", "FULL", "Lasso"),
+    col=c("black","blue","green","orange","red","darkred","purple"),
+    lty=1:7, 
+    lwd=2,
+    pch=c(0,2,4,6,8,10,12)
+  )
+  dev.off()
+
+  output = list()
+  output$mma = Average_Risk_MMA
+  
+  # return(output)
+}
+MMA_ATE_Hansencase(50, 1.0, 2000, 0)
+MMA_ATE_Hansencase(50, 1.2, 2000, 0)
+MMA_ATE_Hansencase(50, 1.5, 2000, 0)
+MMA_ATE_Hansencase(100, 1.0, 2000, 0)
+MMA_ATE_Hansencase(100, 1.2, 2000, 0)
+MMA_ATE_Hansencase(100, 1.5, 2000, 0)
+MMA_ATE_Hansencase(200, 1.0, 2000, 0)
+MMA_ATE_Hansencase(200, 1.2, 2000, 0)
+MMA_ATE_Hansencase(200, 1.5, 2000, 0)
+MMA_ATE_Hansencase(50, 1.0, 2000, 0.5)
+MMA_ATE_Hansencase(50, 1.2, 2000, 0.5)
+MMA_ATE_Hansencase(50, 1.5, 2000, 0.5)
+MMA_ATE_Hansencase(100, 1.0, 2000, 0.5)
+MMA_ATE_Hansencase(100, 1.2, 2000, 0.5)
+MMA_ATE_Hansencase(100, 1.5, 2000, 0.5)
+MMA_ATE_Hansencase(200, 1.0, 2000, 0.5)
+MMA_ATE_Hansencase(200, 1.2, 2000, 0.5)
+MMA_ATE_Hansencase(200, 1.5, 2000, 0.5)
+```
+
+由于上述代码的结果各个方法的 Risk 曲线波动性很强. 因此, 下面不考虑 ATE 的估计, 只考虑处理组的中心点预测的 Risk 问题. 
+```{r, eval=FALSE}
+MMA_Hansencase <- function(n, alpha, num_rep, rho=0){
+
+  num_models = round(3*(n^(1/3)))         # num of models and variables
+
+  num_variables_models = 1:num_models
+  R2 = seq(0.1, 0.9, 0.05)                # 17 values
+  c = sqrt(R2/(1-R2))
+  beta_tmp = (num_variables_models^(-alpha-0.5)) * sqrt(2*alpha)
+  beta_hat_models = matrix(0, num_models, num_models)
+
+  # recorder
+  Average_Risk_MMA = rep(0, length(R2))
+  Average_Risk_AIC = rep(0, length(R2))
+  Average_Risk_BIC = rep(0, length(R2))
+  Average_Risk_SAIC = rep(0, length(R2))
+  Average_Risk_SBIC = rep(0, length(R2))
+  # loop for R-square, the length of R2 is 17
+  for (current_R2 in 1:length(R2)) {  
+    # some recorder variables for repetition
+    Risk_MMA_rep = rep(0, num_rep)
+    Risk_AIC_rep = rep(0, num_rep)
+    Risk_BIC_rep = rep(0, num_rep)
+    Risk_SAIC_rep = rep(0, num_rep)
+    Risk_SBIC_rep = rep(0, num_rep)
+    Risk_models_rep = matrix(0, num_rep, num_models)
+    
+    # model settings
+    scale_for_error = sqrt(1+(c[current_R2]/((num_models+1)^alpha))^2)  # adj for error term
+    beta = beta_tmp * c[current_R2]                                     # beta
+
+    for (current_rep in 1:num_rep) {
+      # generate data
+      Sigma_X = diag(num_models)
+      for (ii in 1:(num_models)) {
+        for (jj in 1:(num_models)) {
+          if (ii==jj) next
+          Sigma_X[ii,jj] = rho**abs(ii-jj)
+        }
+      }
+      X <- MASS::mvrnorm(n=n, mu=rep(0,num_models), Sigma=Sigma_X)    # no interception in X
+      # X <- cbind(matrix(1, n, 1), X)                                    # the first column if interception
+      e = rnorm(n)
+      mu = X %*% beta
+      Y = mu + e*scale_for_error
+
+      sigma_hat = as.numeric(t(Y) %*% (diag(n) - X %*% solve(t(X)%*%X) %*% t(X)) %*% Y / (n-num_models))  # ??
+
+      # estiamte single model
+      for (j in 1:num_models) {
+        beta_hat_models[1:j, j] = diag(j) %*% solve(t(X[, 1:j]) %*% X[, 1:j]) %*% t(X[, 1:j]) %*% Y
+      }
+
+      mu_hat_models = X %*% beta_hat_models
+      Y_models = matrix(rep(Y, num_models), n, num_models)
+      e_hat = Y_models - mu_hat_models
+      sse_hat = colSums(e_hat^2)
+
+      # MMA
+      Amat_t = cbind(matrix(1, num_models, 1), diag(rep(1, num_models)), -1*diag(rep(1, num_models)))
+      bvec_t = rbind(1, matrix(0, num_models, 1), -1*matrix(1, num_models, 1))
+      Dmat = t(e_hat) %*% e_hat + diag(num_models)*1e-6
+      dvec = -num_variables_models*sigma_hat
+      quadprog_solution = quadprog::solve.QP(Dmat=Dmat, dvec=dvec, Amat=Amat_t, bvec=bvec_t, meq=1)
+      ww = quadprog_solution$solution
+      ww = ww*(ww>0); ww = ww/sum(ww)
+      beta_hat_MMA = beta_hat_models %*% ww
+
+      # AIC, SAIC
+      AIC = n * log(sse_hat / n) + num_variables_models*2
+      AIC = AIC - min(AIC)
+      beta_hat_AIC = beta_hat_models[, which.min(AIC)]
+      weights_SAIC = exp(-AIC/2) / sum(exp(-AIC/2))
+      beta_hat_SAIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_models[,ii] * weights_SAIC[ii]))
+      
+      # BIC, SBIC
+      BIC = n * log(sse_hat / n) + num_variables_models*log(n)
+      BIC = BIC - min(BIC)
+      beta_hat_BIC = beta_hat_models[, which.min(BIC)]
+      weights_SBIC = exp(-BIC/2) / sum(exp(-BIC/2))
+      beta_hat_SBIC = Reduce('+', lapply(c(1:num_models), function(ii) beta_hat_models[,ii] * weights_SBIC[ii]))
+      # if (current_R2==1 & current_rep==1) print(weights_SBIC)
+
+      # get Risks of methods: predict at center of X
+      beta_models = matrix(rep(beta, num_models), num_models, num_models)
+      Risk_MMA_rep[current_rep] = (colMeans(X) %*% (beta - beta_hat_MMA))^2
+      Risk_AIC_rep[current_rep] = (colMeans(X) %*% (beta - beta_hat_AIC))^2
+      Risk_BIC_rep[current_rep] = (colMeans(X) %*% (beta - beta_hat_BIC))^2
+      Risk_SAIC_rep[current_rep] = (colMeans(X) %*% (beta - beta_hat_SAIC))^2
+      Risk_SBIC_rep[current_rep] = (colMeans(X) %*% (beta - beta_hat_SBIC))^2
+      Risk_models_rep[current_rep,] = (colMeans(X) %*% (beta_models - beta_hat_models))^2
+    }
+
+    mini_Risk_single_model = min(colMeans(Risk_models_rep))       # this is a strange setting, it chooses the minimal averaged risk. 
+    Average_Risk_MMA[current_R2] = mean(Risk_MMA_rep) / mini_Risk_single_model
+    Average_Risk_AIC[current_R2] = mean(Risk_AIC_rep) / mini_Risk_single_model
+    Average_Risk_BIC[current_R2] = mean(Risk_BIC_rep) / mini_Risk_single_model
+    Average_Risk_SAIC[current_R2] = mean(Risk_SAIC_rep) / mini_Risk_single_model
+    Average_Risk_SBIC[current_R2] = mean(Risk_SBIC_rep) / mini_Risk_single_model
+  }
+
+  # plot.new()
+  # file_name = paste("assets/mean", n, alpha, rho, ".pdf", sep='_')
+  # pdf(file_name, width=6,height=6)
+  ylim_max = max(max(Average_Risk_MMA), max(Average_Risk_AIC), max(Average_Risk_BIC), max(Average_Risk_SAIC), max(Average_Risk_SBIC))
+  ylim_min = min(min(Average_Risk_MMA), min(Average_Risk_AIC), min(Average_Risk_BIC), min(Average_Risk_SAIC), min(Average_Risk_SBIC))
+  plot(seq(0.1, 0.9, 0.05), Average_Risk_MMA, "b", lty=1 ,lwd=2, ylim=c(ylim_min, ylim_max), col='black', main=bquote(n == .(n) ~"and"~ alpha == .(alpha) ~"and"~ rho == .(rho)), xlab=expression(R^2), ylab="Risk")
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_AIC, "b", lty=2 ,lwd=2, col='blue')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_BIC, "b", lty=3 ,lwd=2, col='green')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SAIC, "b", lty=4 ,lwd=2, col='orange')
+  lines(seq(0.1, 0.9, 0.05), Average_Risk_SBIC, "b", lty=5 ,lwd=2, col='red')
+  legend("topright",                                    # position
+    legend=c("MMA","AIC","BIC","S-AIC", "S-BIC"),       # name of lines
+    col=c("black","blue","green","orange","red"),       # color
+    lty=1, lwd=2                                        # size
+  )
+  # dev.off()
+
+  output = list()
+  output$mma = Average_Risk_MMA
+  
+  # return(output)
+}
+MMA_Hansencase(100, 0.5, 100, 0.5)
+```
+
+The following images show the risk curves of different method with the change of $R^2$. 
+
+![Image Title](../assets/pdf2png/mean_35_0.5_0-1.png){width=50%}![Image2 Title](../assets/pdf2png/mean_50_0.5_0-1.png){width=50%}
+![Image3 Title](../assets/pdf2png/mean_75_0.5_0-1.png){width=50%}![Image4 Title](../assets/pdf2png/mean_100_0.5_0-1.png){width=50%}
+
+![Image Title](../assets/pdf2png/mean_35_1_0-1.png){width=50%}![Image2 Title](../assets/pdf2png/mean_50_1_0-1.png){width=50%}
+![Image3 Title](../assets/pdf2png/mean_75_1_0-1.png){width=50%}![Image4 Title](../assets/pdf2png/mean_100_1_0-1.png){width=50%}
+
+![Image Title](../assets/pdf2png/mean_35_0.5_0.5-1.png){width=50%}![Image2 Title](../assets/pdf2png/mean_50_0.5_0.5-1.png){width=50%}
+![Image3 Title](../assets/pdf2png/mean_75_0.5_0.5-1.png){width=50%}![Image4 Title](../assets/pdf2png/mean_100_0.5_0.5-1.png){width=50%}
+
+![Image Title](../assets/pdf2png/mean_35_1_0.5-1.png){width=50%}![Image2 Title](../assets/pdf2png/mean_50_1_0.5-1.png){width=50%}
+![Image3 Title](../assets/pdf2png/mean_75_1_0.5-1.png){width=50%}![Image4 Title](../assets/pdf2png/mean_100_1_0.5-1.png){width=50%}
+
+They show that MMA performs well in predicting the center of samples. 

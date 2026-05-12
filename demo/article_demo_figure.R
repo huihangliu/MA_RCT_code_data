@@ -11,9 +11,9 @@ get_script_dir <- function() {
 
 script_dir <- get_script_dir()
 
-set.seed(1016)
+set.seed(2026)
 n <- 50
-n_T <- 15
+n_T <- 20
 n_C <- n - n_T
 X <- rnorm(n)
 e <- 0.5 * rnorm(n)
@@ -38,17 +38,25 @@ beta_hat_control <- solve(t(X_tmp) %*% X_tmp) %*% t(X_tmp) %*% y_tmp
 ATE_adj <- (mean(y[idx_treated]) - (mean(X[idx_treated]) - mean(X)) * beta_hat_treated) -
   (mean(y[idx_control]) - (mean(X[idx_control]) - mean(X)) * beta_hat_control)
 
+# print
+print(ATE_unadj)
+print(ATE_adj)
+
+# plot
 png(file.path(script_dir, "demo_1.png"), width = 1200, height = 900, res = 150)
+
 plot(
   T[idx_treated],
   y[idx_treated],
   xlim = c(-0.5, 1.5),
   ylim = c(min(y), max(y)),
-  ylab = "Outcomes",
-  xlab = "T",
+  ylab = "y",
+  xlab = "",  # remove x label
   col = rgb(0, 0, 255, 150, maxColorValue = 255),
-  main = paste("ATE hat =", round(ATE_unadj, 2))
+  main = paste("ATE hat =", round(ATE_unadj, 2)),
+  xaxt = "n"  # hide x axis
 )
+axis(1, at = c(0, 1), labels = c("Control", "Treatment"))
 points(T[idx_control], y[idx_control], col = rgb(0, 0, 0, 150, maxColorValue = 255))
 points(1, mean(y[idx_treated]), col = "red", pch = 3, cex = 2)
 points(0, mean(y[idx_control]), col = "red", pch = 4, cex = 2)
@@ -59,9 +67,8 @@ plot(
   X[idx_treated],
   y[idx_treated],
   col = rgb(0, 0, 1, 0.8),
-  main = paste("ATE hat =", round(ATE_adj, 2)),
-  ylab = "Outcomes",
-  xlab = "X",
+  ylab = "y",
+  xlab = "x",
   xlim = c(min(X), max(X)),
   ylim = c(min(y), max(y))
 )
@@ -107,4 +114,8 @@ polygon(
   col = rgb(0.5, 0.5, 0.5, 0.2),
   border = NA
 )
+legend("topleft", legend = c("Control", "Treatment"), 
+       col = c(rgb(0,0,0,150, maxColorValue=255), 
+               rgb(0,0,255,150, maxColorValue=255)), 
+       pch = 1, bty = "n")
 dev.off()

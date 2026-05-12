@@ -11,7 +11,7 @@ I built it by tracing the current manuscript in `../MA_RCT_R1` back to the legac
 - `design1/algorithms_0.1.r`
   Shared R helpers for the Design 1 simulations.
 - `design1/design1_simulation.R`
-  Legacy single-case Design 1 simulation runner for the numerical table. I removed the hard-coded `setwd()` and added a summary CSV export.
+  Legacy single-case Design 1 simulation runner for the numerical table. I removed the hard-coded `setwd()`, added a summary CSV export, and made the main settings runnable from command-line arguments.
 - `design1/design1_results_reference.md`
   Historical notes/results that match the Bias/Var/MSE values appearing in the current paper table.
 - `design1/find_seed_2021.05.27.txt`
@@ -57,12 +57,14 @@ cd realdata
 python3 model_averaging.py
 ```
 
-For Design 1, edit the settings near the top of `design1/design1_simulation.R` before running:
+For Design 1, run the legacy single-case runner with explicit arguments instead of editing the file:
 
 ```bash
 cd design1
-Rscript design1_simulation.R
+Rscript design1_simulation.R seed=1001 n=250 p=50 s=10 rho=0 rep_num=1000 cpus=4
 ```
+
+For a paper-scale rerun of a chosen row, increase `rep_num` accordingly. The historical notes in `design1_results_reference.md` should be treated as the primary provenance guide for that table.
 
 ## Dependencies
 

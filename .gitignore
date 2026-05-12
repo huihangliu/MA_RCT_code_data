@@ -1,0 +1,10 @@
+*.pdf
+*.csv
+.DS_Store
+.Rhistory
+*.RData
+.lintr
+*.png
+temporary
+tmp
+*.html

@@ -1,33 +1,8 @@
-# Legacy single-case runner for the paper's Design 1 simulation table.
-# Edit the settings below to reproduce a specific paper row.
+# data X, beta_t, beta_c, Z, e_t, e_c
+# 这个代码用于在一个seed下, 运行多种方法. (seed 需要在 tmp_0.1.r 中找到)
+
+setwd("~/OneDrive/Repository/RCT-MA/code")
 rm(list=ls())
-
-get_script_dir <- function() {
-  args <- commandArgs(trailingOnly = FALSE)
-  script_arg <- grep("^--file=", args, value = TRUE)
-  if (length(script_arg) == 0) {
-    return(normalizePath("."))
-  }
-  dirname(normalizePath(sub("^--file=", "", script_arg[1])))
-}
-
-script_dir <- get_script_dir()
-
-parse_cli_args <- function(args) {
-  if (length(args) == 0) {
-    return(list())
-  }
-  parsed <- list()
-  for (arg in args) {
-    if (!grepl("=", arg, fixed = TRUE)) {
-      next
-    }
-    key <- sub("=.*$", "", arg)
-    value <- sub("^[^=]*=", "", arg)
-    parsed[[key]] <- type.convert(value, as.is = TRUE)
-  }
-  parsed
-}
 
 suppressMessages(library(parallel)) # for detectCores()
 suppressMessages(library(snowfall)) # parallel programming
@@ -35,29 +10,15 @@ library(glmnet) # for cv.glmnet()
 library(MASS) # for mvrnorm()
 library(stats) # for rt(), rnorm()
 
-defaults <- list(
-  seed = 43,
-  n = 250,
-  p = 50,
-  s = 10,
-  rho = 0,
-  c_tuning = 1,
-  rep_num = 1000,
-  cpus = 4
-)
-cli_args <- parse_cli_args(commandArgs(trailingOnly = TRUE))
-params <- modifyList(defaults, cli_args)
-
-seed <- params$seed
+seed = 15
 set.seed(seed)
 
-n <- params$n   # n_c + n_t
-p <- params$p   # 50 or 500
-s <- params$s   # number of non-zero coefficients of X.
-rho <- params$rho   # 0 or 0.6
-c_tuning <- params$c_tuning
-rep_num <- params$rep_num # set to 1e5 for the paper-scale rerun
-cpus <- params$cpus
+n = 250   # n_c + n_t 
+p = 500    # 50 or 500
+
+s = 10    # number of non-zero coefficients of X.
+rho = 0   # 0 or 0.6
+c_tuning = 1
 
 Sigma_X = diag(p)
 for (ii in 1:p) {
@@ -88,7 +49,7 @@ simulate_once <- function(ii) {
   print(paste("ATE_true:", ATE_true))
 
   # load necessary functions for mma and cv-ma
-  source(file.path(script_dir, "algorithms_0.1.r"))
+  source('algorithms_0.1.r')
   set.seed(ii)
 
   # some important variables
@@ -225,9 +186,10 @@ simulate_once <- function(ii) {
 } # simulate_once(1)
 
 ## run simulation
-suppressMessages(invisible(capture.output(sfInit(parallel = TRUE, cpus = cpus))))
-sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true", "script_dir")
+suppressMessages(invisible(capture.output(sfInit(parallel = TRUE, cpus = 4))))
+sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true")
 
+rep_num <- 10 # 10000
 res_rep_simulation = sfSapply(1:rep_num, simulate_once)
 res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
 suppressMessages(invisible(capture.output(sfStop())))
@@ -235,30 +197,10 @@ suppressMessages(invisible(capture.output(sfStop())))
 
 # analysis the results
 bias_method = colMeans(res_rep_simulation) - c(rep(ATE_true, 5), rep(0, 10))
-var_method = apply(res_rep_simulation[, 1:5, drop = FALSE], 2, var)
+sds_method = apply(res_rep_simulation, 2, sd)
 MSE_method = apply(res_rep_simulation - ATE_true, 2, function(x) norm(x, "2")^2 / rep_num)
-length_method = colMeans(res_rep_simulation[, 6:10, drop = FALSE])
-coverage_method = 100 * colMeans(res_rep_simulation[, 11:15, drop = FALSE])
-
-summary_table <- rbind(
-  Bias = bias_method[1:5],
-  Var = var_method,
-  MSE = MSE_method[1:5],
-  Length = length_method,
-  Coverage_pct = coverage_method
-)
-colnames(summary_table) <- c("unadj", "ols", "lasso", "lasso_ols", "ma")
-
-output_file <- file.path(
-  script_dir,
-  sprintf("design1_summary_n%s_p%s_s%s_rho%s_seed%s_rep%s.csv", n, p, s, rho, seed, rep_num)
-)
-write.csv(summary_table, output_file, row.names = TRUE)
 
 # show result
 print(bias_method)
-print(var_method)
+print(sds_method)
 print(MSE_method)
-print(length_method)
-print(coverage_method)
-print(output_file)

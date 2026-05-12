@@ -14,6 +14,11 @@ DATA_PATH = SCRIPT_DIR / "cirrhosis.csv"
 OUTPUT_PATH = SCRIPT_DIR / "real_res.pdf"
 
 
+def _scalar(value):
+    """Safely convert a length-1 array-like object to a Python float."""
+    return float(np.asarray(value).reshape(-1)[0])
+
+
 def lasso_alpha_bisection(x, y, initial_alpha=1e10):
     alpha0 = initial_alpha
     res_alpha_list = [alpha0]
@@ -174,24 +179,26 @@ x_all = data_all.loc[:, feature_list]
 x_mu = np.mean(x_all.iloc[:, 4:], axis=0).values.reshape(1, -1)
 x_t_mu = np.mean(x_t.iloc[:, 4:], axis=0).values.reshape(1, -1)
 x_c_mu = np.mean(x_c.iloc[:, 4:], axis=0).values.reshape(1, -1)
-y_t_mu = float(np.mean(y_t))
-y_c_mu = float(np.mean(y_c))
+y_t_group_mean = _scalar(y_t.to_numpy().mean())
+y_c_group_mean = _scalar(y_c.to_numpy().mean())
 
 model_pred_mu_t = []
 model_pred_mu_c = []
 for i in range(len(t_fit["model_index_list"])):
     model_pred_mu_t.append(
-        ((x_t_mu - x_mu)[:, t_fit["model_index_list"][i]] @ t_fit["model_coef_list"][i].T).reshape(-1)
+        _scalar((x_t_mu - x_mu)[:, t_fit["model_index_list"][i]] @ t_fit["model_coef_list"][i].T)
     )
 for i in range(len(c_fit["model_index_list"])):
     model_pred_mu_c.append(
-        ((x_c_mu - x_mu)[:, c_fit["model_index_list"][i]] @ c_fit["model_coef_list"][i].T).reshape(-1)
+        _scalar((x_c_mu - x_mu)[:, c_fit["model_index_list"][i]] @ c_fit["model_coef_list"][i].T)
     )
 
+y_t_mu = y_t_group_mean
+y_c_mu = y_c_group_mean
 for i in range(len(t_fit["model_index_list"])):
-    y_t_mu -= float(t_fit["weights"][i] * model_pred_mu_t[i])
+    y_t_mu -= _scalar(t_fit["weights"][i] * model_pred_mu_t[i])
 for i in range(len(c_fit["model_index_list"])):
-    y_c_mu -= float(c_fit["weights"][i] * model_pred_mu_c[i])
+    y_c_mu -= _scalar(c_fit["weights"][i] * model_pred_mu_c[i])
 ate_ma = float(y_t_mu - y_c_mu)
 
 sample_size_t = y_t_sc.shape[0]
@@ -200,19 +207,21 @@ sigma_ma = float((c_fit["sigma_ma"] / sample_size_c + t_fit["sigma_ma"] / sample
 sigma_y = float((np.var(data_t["N_Days"]) / sample_size_t + np.var(data_c["N_Days"]) / sample_size_c) ** 0.5)
 
 lasso_t = LassoCV()
-lasso_t.fit(x_t_sc, y_t_sc)
+lasso_t.fit(x_t_sc, y_t_sc.ravel())
 lasso_c = LassoCV()
-lasso_c.fit(x_c_sc, y_c_sc)
+lasso_c.fit(x_c_sc, y_c_sc.ravel())
 sigma_lasso_t = mean_squared_error(y_t_sc.reshape(-1), x_t_sc @ lasso_t.coef_) * sample_size_t / (
     sample_size_t - np.sum(lasso_t.coef_ != 0)
 )
 sigma_lasso_c = mean_squared_error(y_c_sc.reshape(-1), x_c_sc @ lasso_c.coef_) * sample_size_c / (
     sample_size_c - np.sum(lasso_c.coef_ != 0)
 )
-ate_lasso = float((y_t_mu - float((x_t_mu - x_mu) @ lasso_t.coef_)) - (y_c_mu - float((x_c_mu - x_mu) @ lasso_c.coef_)))
+y_t_mu_lasso = y_t_group_mean - _scalar((x_t_mu - x_mu) @ lasso_t.coef_)
+y_c_mu_lasso = y_c_group_mean - _scalar((x_c_mu - x_mu) @ lasso_c.coef_)
+ate_lasso = float(y_t_mu_lasso - y_c_mu_lasso)
 sigma_lasso = float((sigma_lasso_c / sample_size_c + sigma_lasso_t / sample_size_t) ** 0.5)
 
-plt.figure(figsize=(5, 5))
+plt.figure(figsize=(4.7, 3.4))
 my_xticks = ["Unadjusted", "Lasso", "Model Averaging"]
 plt.xticks([0, 1, 2], my_xticks)
 plt.xlim(-0.5, 2.5)
