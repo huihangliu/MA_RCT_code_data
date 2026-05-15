@@ -1,5 +1,4 @@
 # Some useful functions for RCT. 
-# Precisoin 1 上的代码是新的。 
 
 # Re-estimate lasso solution path by OLS
 ols_estimate <- function (lasso_estimate, x_input, y_input) {
@@ -54,7 +53,7 @@ remove_repeated_columns <- function(input_array) {
 }
 
 # mma(lasso+ols)
-mma_lasso_ols <- function(X_centered, y_centered) {
+mma_lasso_ols <- function(X_centered, y_centered, sigma2=0) {
   res_lasso = glmnet::glmnet(X_centered, y_centered)
   
   beta_hat_lasso_path = as.matrix(res_lasso$beta)         # size: p*num_model
@@ -70,26 +69,26 @@ mma_lasso_ols <- function(X_centered, y_centered) {
       beta_support[,mm] = tmp
     }
   }
-  beta_hat_lasso_path = beta_support
-  num_models = ncol(beta_hat_lasso_path)
+  num_models = ncol(beta_support)
   
   # de-duplicatation
-  beta_hat_ols_path = sapply(1:num_models, function(mm) ols_estimate(beta_hat_lasso_path[,mm], X_centered, y_centered))
+  beta_hat_ols_path = sapply(1:num_models, function(mm) ols_estimate(beta_support[,mm], X_centered, y_centered))
   beta_hat_ols_path_deduplication = remove_repeated_columns(beta_hat_ols_path)$unique_array
   
   num_models = ncol(beta_hat_ols_path_deduplication)
   num_variables_in_models = sapply(1:num_models, function(ii) length(which(abs(beta_hat_ols_path_deduplication[,ii]) > 1e-8)))
 
-  # print the number of non-zero elements in each model
-  num_variables_in_models = sapply(1:num_models, function(ii) length(which(abs(beta_hat_ols_path_deduplication[,ii]) > 1e-8)))
-
-  sigma2_hat = norm(y_centered - X_centered %*% beta_hat_ols_path_deduplication[,num_models], '2')^2 / (nrow(X_centered) - num_variables_in_models[num_models])                    # the residual / dof (bigest model)
-  
+  if (sigma2 == 0) {
+    sigma2_hat = norm(y_centered - X_centered %*% beta_hat_ols_path_deduplication[,num_models], '2')^2 / (nrow(X_centered) - num_variables_in_models[num_models])                    # the residual / dof (bigest model)  
+  } else {
+    sigma2_hat = sigma2
+  }
+    
   U = X_centered %*% beta_hat_ols_path_deduplication      # mean values, n*num_models
 
   # Qudratic programming
   Dmat_t = t(U) %*% U + diag(num_models)*1e-6             # prevent from semi-defintion
-  dvec_t = t(y_centered) %*% U - log(nrow(X_centered))*sigma2_hat*num_variables_in_models * 10 # this is pma
+  dvec_t = t(y_centered) %*% U - 4*log(nrow(X_centered))*sigma2_hat*num_variables_in_models # 64 is best for s=50
   Amat_t = cbind(matrix(1,num_models,1), diag(rep(1,num_models)), -1*diag(rep(1,num_models)))
   bvec_t = rbind(1, matrix(0,num_models,1), -1*matrix(1,num_models,1))
   quadprog_solution = quadprog::solve.QP(Dmat=Dmat_t, dvec=dvec_t, Amat=Amat_t, bvec=bvec_t, meq=1)
@@ -267,4 +266,3 @@ mini_risk_models <- function(x_input, y_input, num_variables_in_models, mean_val
   risk_models = sapply(1:num_model, function(mm) norm(mean_value_oracal - x_input %*% beta_hat_in_models[,mm], '2')^2)
   return(min(risk_models))
 }
-

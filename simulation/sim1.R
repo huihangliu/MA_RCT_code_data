@@ -1,5 +1,5 @@
-# Legacy single-case runner for the paper's Design 1 simulation table.
-# Edit the settings below to reproduce a specific paper row.
+# Runner for the paper's Design 1 simulation table.
+# Set run_once below to switch between one replication and parallel replications.
 rm(list=ls())
 
 get_script_dir <- function() {
@@ -29,11 +29,24 @@ parse_cli_args <- function(args) {
   parsed
 }
 
-suppressMessages(library(parallel)) # for detectCores()
-suppressMessages(library(snowfall)) # parallel programming
-library(glmnet) # for cv.glmnet()
-library(MASS) # for mvrnorm()
-library(stats) # for rt(), rnorm()
+as_logical_flag <- function(x) {
+  if (is.logical(x)) {
+    return(isTRUE(x))
+  }
+  if (is.numeric(x)) {
+    return(x != 0)
+  }
+  if (is.character(x)) {
+    value <- tolower(x)
+    if (value %in% c("true", "t", "1", "yes", "y")) {
+      return(TRUE)
+    }
+    if (value %in% c("false", "f", "0", "no", "n")) {
+      return(FALSE)
+    }
+  }
+  stop("run_once must be TRUE or FALSE")
+}
 
 defaults <- list(
   seed = 43,
@@ -43,7 +56,8 @@ defaults <- list(
   rho = 0,
   c_tuning = 1,
   rep_num = 1000,
-  cpus = 4
+  cpus = 4,
+  run_once = TRUE
 )
 cli_args <- parse_cli_args(commandArgs(trailingOnly = TRUE))
 params <- modifyList(defaults, cli_args)
@@ -58,6 +72,15 @@ rho <- params$rho   # 0 or 0.6
 c_tuning <- params$c_tuning
 rep_num <- params$rep_num # set to 1e5 for the paper-scale rerun
 cpus <- params$cpus
+run_once <- as_logical_flag(params$run_once)
+
+suppressMessages(library(parallel)) # for detectCores()
+if (!run_once) {
+  suppressMessages(library(snowfall)) # parallel programming
+}
+library(glmnet) # for cv.glmnet()
+library(MASS) # for mvrnorm()
+library(stats) # for rt(), rnorm()
 
 Sigma_X = diag(p)
 for (ii in 1:p) {
@@ -225,18 +248,23 @@ simulate_once <- function(ii) {
 } # simulate_once(1)
 
 ## run simulation
-suppressMessages(invisible(capture.output(sfInit(parallel = TRUE, cpus = cpus))))
-sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true", "script_dir")
+if (run_once) {
+  res_rep_simulation = matrix(simulate_once(1), nrow = 1)
+} else {
+  suppressMessages(invisible(capture.output(sfInit(parallel = TRUE, cpus = cpus))))
+  sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true", "script_dir")
 
-res_rep_simulation = sfSapply(1:rep_num, simulate_once)
-res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
-suppressMessages(invisible(capture.output(sfStop())))
+  res_rep_simulation = sfSapply(1:rep_num, simulate_once)
+  res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
+  suppressMessages(invisible(capture.output(sfStop())))
+}
 
 
 # analysis the results
+rep_num_actual = nrow(res_rep_simulation)
 bias_method = colMeans(res_rep_simulation) - c(rep(ATE_true, 5), rep(0, 10))
 var_method = apply(res_rep_simulation[, 1:5, drop = FALSE], 2, var)
-MSE_method = apply(res_rep_simulation - ATE_true, 2, function(x) norm(x, "2")^2 / rep_num)
+MSE_method = apply(res_rep_simulation - ATE_true, 2, function(x) norm(x, "2")^2 / rep_num_actual)
 length_method = colMeans(res_rep_simulation[, 6:10, drop = FALSE])
 coverage_method = 100 * colMeans(res_rep_simulation[, 11:15, drop = FALSE])
 
@@ -251,7 +279,7 @@ colnames(summary_table) <- c("unadj", "ols", "lasso", "lasso_ols", "ma")
 
 output_file <- file.path(
   script_dir,
-  sprintf("design1_summary_n%s_p%s_s%s_rho%s_seed%s_rep%s.csv", n, p, s, rho, seed, rep_num)
+  sprintf("design1_summary_n%s_p%s_s%s_rho%s_seed%s_rep%s.csv", n, p, s, rho, seed, rep_num_actual)
 )
 write.csv(summary_table, output_file, row.names = TRUE)
 

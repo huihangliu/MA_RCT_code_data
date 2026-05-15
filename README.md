@@ -66,6 +66,17 @@ Rscript design1_simulation.R seed=1001 n=250 p=50 s=10 rho=0 rep_num=1000 cpus=4
 
 For a paper-scale rerun of a chosen row, increase `rep_num` accordingly. The historical notes in `design1_results_reference.md` should be treated as the primary provenance guide for that table.
 
+## Environment
+
+Create the local conda environment directly at this repository path:
+
+```bash
+conda env create -p ./.venv -f environment.yml
+conda activate ./.venv
+```
+
+Do not copy an existing conda environment into `.venv`; conda environments contain absolute prefix paths, and copied environments can keep pointing back to the original location.
+
 ## Dependencies
 
 R side:
@@ -77,6 +88,10 @@ R side:
 - `tidyr`
 - `quadprog`
 - `RhpcBLASctl`
+- `ncvreg`
+- `knitr`
+- `rmarkdown`
+- `bookdown`
 
 Python side:
 

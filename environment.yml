@@ -1,0 +1,21 @@
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - cvxpy
+  - r-base=4.5.3
+  - r-snowfall
+  - r-glmnet
+  - r-mass
+  - r-purrr
+  - r-tidyr
+  - r-quadprog
+  - r-rhpcblasctl
+  - r-ncvreg
+  - r-knitr
+  - r-rmarkdown
+  - r-bookdown

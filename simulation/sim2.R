@@ -1,8 +1,16 @@
 # Design 2 simulation used for the paper's risk, CI-length, and CI-coverage figures.
 # The article panels were selected from multiple seeds; this script reruns the same design
 # for a chosen seed and writes all outputs into the local output/ directory.
-library(snowfall)
+hostname <- system("hostname", intern = TRUE)
+  if  (hostname == "7920") {
+    num_cpus <- 95
+  } else {
+    num_cpus <- 8
+}
+
+
 library(purrr)
+
 
 default_seed <- 43
 output_dir <- "output"
@@ -348,7 +356,8 @@ MMA_ATE_Hansencase <- function(n, alpha, num_rep = 2000, rho = 0, seed = 43) {
   
   # debug print("Print risk curve")
   # plot the risk curve
-  file_name <- file.path(output_dir, paste("ate_", n, "_", alpha, "_", rho, "_", num_rep, "_", seed, ".pdf", sep = ""))
+  file_name <- file.path(output_dir, paste("risk_", n, "_", alpha, "_", rho, "_", num_rep, "_", seed, ".pdf", sep = ""))
+  
   pdf(file_name, width = 6, height = 6)
   ylim_max <- max(max(Average_Risk$MMA), max(Average_Risk$AIC), max(Average_Risk$BIC), max(Average_Risk$SAIC), max(Average_Risk$SBIC), max(Average_Risk$FULL))
   ylim_min <- min(min(Average_Risk$MMA), min(Average_Risk$AIC), min(Average_Risk$BIC), min(Average_Risk$SAIC), min(Average_Risk$SBIC), min(Average_Risk$FULL))
@@ -402,11 +411,12 @@ main_parallel <- function(idx_setting) {
   )
 }
 
-if (FALSE) {
+if (TRUE) {
   MMA_ATE_Hansencase(200, 1, 2001, 0.5, seed = 2024)
 } else {
-  sfInit(parallel = TRUE, cpus = 3)
-  sfExport("settings", "MMA_ATE_Hansencase")
+  library(snowfall)
+  sfInit(parallel = TRUE, cpus = num_cpus)
+  sfExport("settings", "default_seed", "output_dir", "MMA_ATE_Hansencase")
   sfLapply(seq_len(nrow(settings)), main_parallel)
   sfStop()
 }
