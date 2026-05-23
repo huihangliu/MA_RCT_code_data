@@ -11,3 +11,12 @@
 temporary
 tmp
 *.html
+.vscode
+output/
+paper/
+other-codes/
+debug/
+scripts/
+results/
+logs/
+*/__pycache__/

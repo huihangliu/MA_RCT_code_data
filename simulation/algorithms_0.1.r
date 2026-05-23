@@ -53,7 +53,12 @@ remove_repeated_columns <- function(input_array) {
 }
 
 # mma(lasso+ols)
-mma_lasso_ols <- function(X_centered, y_centered, sigma2=0) {
+mma_lasso_ols <- function(X_centered, y_centered, sigma2=0, penalty_lambda=2) {
+  if (length(penalty_lambda) != 1 || is.na(penalty_lambda) ||
+      !is.finite(penalty_lambda) || penalty_lambda <= 0) {
+    stop("penalty_lambda must be a single positive finite value")
+  }
+
   res_lasso = glmnet::glmnet(X_centered, y_centered)
   
   beta_hat_lasso_path = as.matrix(res_lasso$beta)         # size: p*num_model
@@ -88,7 +93,7 @@ mma_lasso_ols <- function(X_centered, y_centered, sigma2=0) {
 
   # Qudratic programming
   Dmat_t = t(U) %*% U + diag(num_models)*1e-6             # prevent from semi-defintion
-  dvec_t = t(y_centered) %*% U - 4*log(nrow(X_centered))*sigma2_hat*num_variables_in_models # 64 is best for s=50
+  dvec_t = t(y_centered) %*% U - penalty_lambda*sigma2_hat*num_variables_in_models
   Amat_t = cbind(matrix(1,num_models,1), diag(rep(1,num_models)), -1*diag(rep(1,num_models)))
   bvec_t = rbind(1, matrix(0,num_models,1), -1*matrix(1,num_models,1))
   quadprog_solution = quadprog::solve.QP(Dmat=Dmat_t, dvec=dvec_t, Amat=Amat_t, bvec=bvec_t, meq=1)
@@ -97,6 +102,7 @@ mma_lasso_ols <- function(X_centered, y_centered, sigma2=0) {
   res <- list()
   res$beta_hat <- beta_hat_mma_lasso_ols
   res$weight <- weight_hat
+  res$penalty_lambda <- penalty_lambda
   res$beta_hat_ols_path_deduplication <- beta_hat_ols_path_deduplication
   return(res)
 }

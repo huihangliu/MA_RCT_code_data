@@ -1,5 +1,4 @@
 # Runner for the paper's Design 1 simulation table.
-# Set run_once below to switch between one replication and parallel replications.
 rm(list=ls())
 
 get_script_dir <- function() {
@@ -12,6 +11,7 @@ get_script_dir <- function() {
 }
 
 script_dir <- get_script_dir()
+cat("Script directory:", script_dir, "\n")
 
 parse_cli_args <- function(args) {
   if (length(args) == 0) {
@@ -48,16 +48,80 @@ as_logical_flag <- function(x) {
   stop("run_once must be TRUE or FALSE")
 }
 
+select_lambda <- function(p, n_treated, n_control, n_total, override = NA_real_) {
+  has_override <- !is.null(override) && length(override) > 0 && !(length(override) == 1 && is.na(override))
+  if (has_override) {
+    override <- suppressWarnings(as.numeric(override))
+    if (length(override) != 1 || is.na(override) ||
+        !is.finite(override) || override <= 0) {
+      stop("ma_lambda must be a positive finite value")
+    }
+    return(list(value = override, rule = "manual"))
+  }
+
+  if (p < min(n_treated, n_control)) {
+    return(list(value = 2, rule = "paper_low_dimensional_lambda_2"))
+  }
+
+  list(value = 4 * log(n_total), rule = "paper_high_dimensional_lambda_4logn")
+}
+
+is_absolute_path <- function(path) {
+  grepl("^(/|[A-Za-z]:[\\/])", path)
+}
+
+resolve_path <- function(path, base_dir) {
+  if (is_absolute_path(path)) {
+    return(normalizePath(path, mustWork = FALSE))
+  }
+  normalizePath(file.path(base_dir, path), mustWork = FALSE)
+}
+
+make_unique_dir <- function(parent, name) {
+  dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+  candidate <- file.path(parent, name)
+  if (!dir.exists(candidate)) {
+    return(candidate)
+  }
+
+  suffix <- 2
+  repeat {
+    candidate <- file.path(parent, sprintf("%s_%02d", name, suffix))
+    if (!dir.exists(candidate)) {
+      return(candidate)
+    }
+    suffix <- suffix + 1
+  }
+}
+
+copy_code_snapshot <- function(script_dir, code_dir) {
+  simulation_code_dir <- file.path(code_dir, "simulation")
+  dir.create(simulation_code_dir, recursive = TRUE, showWarnings = FALSE)
+
+  simulation_files <- file.path(script_dir, c("sim1.R", "algorithms_0.1.r"))
+  existing_simulation_files <- simulation_files[file.exists(simulation_files)]
+  if (length(existing_simulation_files) > 0) {
+    file.copy(existing_simulation_files, simulation_code_dir, overwrite = TRUE)
+  }
+
+  readme_file <- file.path(dirname(script_dir), "README.md")
+  if (file.exists(readme_file)) {
+    file.copy(readme_file, code_dir, overwrite = TRUE)
+  }
+}
+
 defaults <- list(
   seed = 43,
   n = 250,
   p = 50,
   s = 10,
   rho = 0,
-  c_tuning = 1,
-  rep_num = 1000,
+  ma_lambda = NA_real_,
+  rep_num = 10,
   cpus = 4,
-  run_once = TRUE
+  run_once = TRUE,
+  output_root = "output",
+  run_dir = NA_character_
 )
 cli_args <- parse_cli_args(commandArgs(trailingOnly = TRUE))
 params <- modifyList(defaults, cli_args)
@@ -67,12 +131,67 @@ set.seed(seed)
 
 n <- params$n   # n_c + n_t
 p <- params$p   # 50 or 500
-s <- params$s   # number of non-zero coefficients of X.
+s <- params$s   # number of non-zero coefficients of X, 10, 20, 30, 50
 rho <- params$rho   # 0 or 0.6
-c_tuning <- params$c_tuning
 rep_num <- params$rep_num # set to 1e5 for the paper-scale rerun
 cpus <- params$cpus
 run_once <- as_logical_flag(params$run_once)
+output_root_param <- params$output_root
+run_dir_param <- params$run_dir
+n_treated_design <- n / 2
+n_control_design <- n - n_treated_design
+ma_lambda_selection <- select_lambda(
+  p = p,
+  n_treated = n_treated_design,
+  n_control = n_control_design,
+  n_total = n,
+  override = params$ma_lambda
+)
+ma_lambda <- ma_lambda_selection$value
+ma_lambda_rule <- ma_lambda_selection$rule
+
+repo_dir <- dirname(script_dir)
+output_root <- resolve_path(output_root_param, repo_dir)
+
+run_timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+has_run_dir <- !is.na(run_dir_param) && nzchar(as.character(run_dir_param))
+experiment_dir <- if (has_run_dir) {
+  resolve_path(as.character(run_dir_param), repo_dir)
+} else {
+  make_unique_dir(output_root, run_timestamp)
+}
+results_dir <- file.path(experiment_dir, "results")
+code_dir <- file.path(experiment_dir, "code")
+metadata_dir <- file.path(experiment_dir, "metadata")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(metadata_dir, recursive = TRUE, showWarnings = FALSE)
+copy_code_snapshot(script_dir, code_dir)
+
+run_id <- sprintf("n%s_p%s_s%s_rho%s_seed%s_rep%s", n, p, s, rho, seed, rep_num)
+metadata_prefix <- file.path(metadata_dir, run_id)
+writeLines(
+  c(
+    paste("started_at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+    paste("script_dir:", script_dir),
+    paste("experiment_dir:", experiment_dir),
+    paste("results_dir:", results_dir),
+    paste("command_args:", paste(commandArgs(), collapse = " ")),
+    "params:",
+    capture.output(str(params)),
+    "derived:",
+    paste("n_treated:", n_treated_design),
+    paste("n_control:", n_control_design),
+    paste("ma_lambda:", ma_lambda),
+    paste("ma_lambda_rule:", ma_lambda_rule)
+  ),
+  paste0(metadata_prefix, "_run_info.txt")
+)
+cat("Experiment directory:", experiment_dir, "\n")
+cat("Design 1 MA penalty lambda:", ma_lambda, "(", ma_lambda_rule, ")\n")
+
+if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+  RhpcBLASctl::blas_set_num_threads(1)
+}
 
 suppressMessages(library(parallel)) # for detectCores()
 if (!run_once) {
@@ -176,6 +295,15 @@ simulate_once <- function(ii) {
   CI_len_cvlasso = diff(CI_cvlasso)
   CI_coverage_cvlasso = (ATE_true >= CI_cvlasso[1]) & (ATE_true <= CI_cvlasso[2])
 
+  beta_hat_lasso_refit_treated_for_ma = ols_estimate(as.numeric(res_cvlasso_treated$beta), X_treated_centered, y_treated_centered)
+  beta_hat_lasso_refit_control_for_ma = ols_estimate(as.numeric(res_cvlasso_control$beta), X_control_centered, y_control_centered)
+  residual_lasso_refit_treated_for_ma = y_treated_centered - X_treated_centered%*%beta_hat_lasso_refit_treated_for_ma
+  residual_lasso_refit_control_for_ma = y_control_centered - X_control_centered%*%beta_hat_lasso_refit_control_for_ma
+  df_lasso_refit_treated_for_ma = sum(abs(beta_hat_lasso_refit_treated_for_ma) > 1e-8)
+  df_lasso_refit_control_for_ma = sum(abs(beta_hat_lasso_refit_control_for_ma) > 1e-8)
+  sigma2_lasso_refit_treated_for_ma = as.numeric(t(residual_lasso_refit_treated_for_ma)%*%residual_lasso_refit_treated_for_ma / max(n_treated - df_lasso_refit_treated_for_ma - 1, 1))
+  sigma2_lasso_refit_control_for_ma = as.numeric(t(residual_lasso_refit_control_for_ma)%*%residual_lasso_refit_control_for_ma / max(n_control - df_lasso_refit_control_for_ma - 1, 1))
+
   # method 4: cv(lasso+ols)
   beta_hat_cv_ms_lasso_ols_treated = cv_ma_lasso_ols(X_treated_centered, y_treated_centered, refit=TRUE, smooth=FALSE)
   beta_hat_cv_ms_lasso_ols_control = cv_ma_lasso_ols(X_control_centered, y_control_centered, refit=TRUE, smooth=FALSE)
@@ -195,9 +323,14 @@ simulate_once <- function(ii) {
   print(paste("Lasso sigma2_treated", sigma2_treated, "sigma2_control", sigma2_control))
 
   # method 5: mma (lasso path + ols refitting)
-  res_treated <- mma_lasso_ols(X_treated_centered, y_treated_centered)   # treated group
+  if (min(n_treated, n_control) > p) {
+    res_treated <- mma_lasso_ols(X_treated_centered, y_treated_centered, penalty_lambda = ma_lambda)   # treated group
+    res_control <- mma_lasso_ols(X_control_centered, y_control_centered, penalty_lambda = ma_lambda)   # control group
+  } else {
+    res_treated <- mma_lasso_ols(X_treated_centered, y_treated_centered, sigma2 = sigma2_lasso_refit_treated_for_ma, penalty_lambda = ma_lambda)   # treated group
+    res_control <- mma_lasso_ols(X_control_centered, y_control_centered, sigma2 = sigma2_lasso_refit_control_for_ma, penalty_lambda = ma_lambda)   # control group
+  }
   beta_hat_mma_lasso_ols_treated = res_treated$beta_hat
-  res_control <- mma_lasso_ols(X_control_centered, y_control_centered)   # control group
   beta_hat_mma_lasso_ols_control = res_control$beta_hat
   ATE_mma_lasso_ols = (mean(y_treated) - t(colMeans(X_treated) - colMeans(X))%*%beta_hat_mma_lasso_ols_treated) - (mean(y_control) - t(colMeans(X_control) - colMeans(X))%*%beta_hat_mma_lasso_ols_control)
   residual_treated = y_treated_centered - X_treated_centered%*%beta_hat_mma_lasso_ols_treated
@@ -249,10 +382,15 @@ simulate_once <- function(ii) {
 
 ## run simulation
 if (run_once) {
-  res_rep_simulation = matrix(simulate_once(1), nrow = 1)
+  res_rep_simulation = matrix(simulate_once(2), nrow = 1)
 } else {
   suppressMessages(invisible(capture.output(sfInit(parallel = TRUE, cpus = cpus))))
-  sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true", "script_dir")
+  sfClusterEval(
+    if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+      RhpcBLASctl::blas_set_num_threads(1)
+    }
+  )
+  sfExport("n", "p", "X", "y_treated_oracle", "y_control_oracle", "ATE_true", "script_dir", "ma_lambda")
 
   res_rep_simulation = sfSapply(1:rep_num, simulate_once)
   res_rep_simulation = t(res_rep_simulation)    # size: rep_num*method_num
@@ -278,15 +416,26 @@ summary_table <- rbind(
 colnames(summary_table) <- c("unadj", "ols", "lasso", "lasso_ols", "ma")
 
 output_file <- file.path(
-  script_dir,
+  results_dir,
   sprintf("design1_summary_n%s_p%s_s%s_rho%s_seed%s_rep%s.csv", n, p, s, rho, seed, rep_num_actual)
 )
 write.csv(summary_table, output_file, row.names = TRUE)
+writeLines(
+  c(
+    paste("finished_at:", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+    paste("output_file:", output_file),
+    paste("ma_lambda:", ma_lambda),
+    paste("ma_lambda_rule:", ma_lambda_rule)
+  ),
+  paste0(metadata_prefix, "_completion.txt")
+)
 
 # show result
-print(bias_method)
-print(var_method)
-print(MSE_method)
-print(length_method)
-print(coverage_method)
-print(output_file)
+print("Summary Table:")
+print(summary_table)
+# print(bias_method)
+# print(var_method)
+# print(MSE_method)
+# print(length_method)
+# print(coverage_method)
+cat("Output:", output_file, "\n")
