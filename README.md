@@ -1,61 +1,59 @@
 # MA_RCT_code_data
 
-This folder is a cleaned reproducibility subset for the RCT model-averaging paper.
-
-I built it by tracing the current manuscript in `../MA_RCT_R1` back to the legacy code under `/Users/huihang/Documents/Repository/RCT-MA/rct-ma-code`, then copying only the files that appear to support article figures or simulation tables.
+This folder is the code repo for RCT model-averaging.
 
 ## What Is Included
 
-- `demo/article_demo_figure.R`
-  Generates `demo_1.png` and `demo_2.png`, which match the conceptual two-panel illustration used in the manuscript.
-- `design1/algorithms_0.1.r`
-  Shared R helpers for the Design 1 simulations.
-- `design1/design1_simulation.R`
-  Legacy single-case Design 1 simulation runner for the numerical table. I removed the hard-coded `setwd()`, added a summary CSV export, and made the main settings runnable from command-line arguments.
-- `design1/design1_results_reference.md`
-  Historical notes/results that match the Bias/Var/MSE values appearing in the current paper table.
-- `design2/simulation_design2.R`
-  Main Design 2 simulation script. It produces the risk curves (`ate_*.pdf`) plus the CI summary CSV files used for the coverage/interval-length panels.
-- `design2/plot_design2_from_csv.R`
-  Cleaned plotting script for turning the article-used `CI_coverage_*.csv` and `CI_len_*.csv` files into the corresponding PDFs.
+- `environment.yml`
+  Conda environment specification for the R and Python dependencies used by the simulations, plotting scripts, and real-data analysis.
+- `simulation/algorithms_0.1.r`
+  Shared R helper functions used by the Design 1 simulation runner.
+- `simulation/article_demo_figure.R`
+  Generates the two simple conceptual demo figures, `simulation/demo_1.png` and `simulation/demo_2.png`.
+- `simulation/demo_plot.R`
+  Generates polished PDF versions of the same demo illustration, `simulation/demo_1.pdf` and `simulation/demo_2.pdf`.
+- `simulation/sim1.R`
+  Design 1 simulation runner for the paper table. It accepts `key=value` command-line arguments, writes timestamped output directories, and snapshots the code used for each run.
+- `simulation/draw_design1_results.R`
+  Converts Design 1 summary CSV files into paper-ready table outputs.
+- `simulation/sim2.R`
+  Design 2 simulation runner for risk, CI length, CI coverage, and ATE histogram outputs. It supports a quick `debug` mode and a full `parallel` mode.
+- `simulation/draw_design2_results.py`
+  Plots Design 2 `risk_*.csv`, `CI_len_*.csv`, and `CI_coverage_*.csv` summaries into by-seed and seed-average PDF figures.
 - `realdata/model_averaging.py`
-  Self-contained real-data analysis script for the cirrhosis example. I changed the absolute input path to a local relative path and made it save `real_res.pdf`.
+  Self-contained real-data analysis script for the cirrhosis example. It reads the local CSV and saves `realdata/real_res.pdf`.
 - `realdata/cirrhosis.csv`
   Input data for the real-data figure.
 
 ## Usage
 
+Create the local environment from the repository root:
+
+```bash
+conda env create -p ./.venv -f environment.yml
+conda activate ./.venv
+```
+
 For the demo figures, run:
-```bash
-cd demo
-Rscript article_demo_figure.R
-```
-
-For Design 1, the current runner is `simulation/sim1.R`. 
-The paper setting is `n=250`, balanced treatment/control groups (`125/125`), iid Gaussian covariates (`rho=0`), and `1e5` treatment re-randomization replications. Run a quick smoke
-test first:
 
 ```bash
-scripts/run_design1_local_debug.sh
+Rscript simulation/article_demo_figure.R
+Rscript simulation/demo_plot.R
 ```
 
-For a local single-case debug run with paper-like dimensions:
+For a quick Design 1 smoke test:
 
 ```bash
-N=250 P=50 S=10 RUN_ONCE=TRUE scripts/run_design1_local_debug.sh
+Rscript simulation/sim1.R seed=43 n=50 p=10 s=2 rho=0 rep_num=1 cpus=1 run_once=TRUE output_root=output
 ```
 
-For a paper-scale rerun on Precision1, launch the detached remote job:
+For a local Design 1 run with paper-like dimensions:
 
 ```bash
-scripts/run_design1_remote_paper.sh
+Rscript simulation/sim1.R seed=43 n=250 p=50 s=10 rho=0 rep_num=100 cpus=4 run_once=FALSE output_root=output
 ```
 
-The remote runner computes the parallel worker count as the available core count
-minus 10, and `simulation/sim1.R` restricts BLAS to one thread per worker via
-`RhpcBLASctl::blas_set_num_threads(1)`.
-
-Each `sim1.R` run writes to a timestamped output directory:
+Each `sim1.R` run writes a timestamped directory under `output/` unless `run_dir=...` is supplied:
 
 ```text
 output/YYYYmmdd_HHMMSS/
@@ -64,67 +62,42 @@ output/YYYYmmdd_HHMMSS/
   metadata/
 ```
 
-For a multi-command paper-scale run, pass the same `run_dir=output/YYYYmmdd_HHMMSS`
-to each command so all table rows land in one experiment directory. After the
-remote run finishes, sync the output back to local:
-
-```bash
-scripts/sync_output_from_precision1.sh
-```
-
-Generate paper-ready Design 1 table files from a run directory:
+Generate Design 1 table files from a run directory:
 
 ```bash
 Rscript simulation/draw_design1_results.R run_dir=output/YYYYmmdd_HHMMSS
 ```
 
-This creates `draw/design1_table.tex`, `draw/design1_table_body.tex`,
-`draw/design1_table.md`, and `draw/design1_table_values.csv` inside the run
-directory.
+This creates `draw/design1_table.tex`, `draw/design1_table_body.tex`, `draw/design1_table.md`, and `draw/design1_table_values.csv` inside the run directory.
+
+For a quick Design 2 debug run:
 
 ```bash
-cd design2
-Rscript simulation_design2.R
-Rscript plot_design2_from_csv.R
+Rscript simulation/sim2.R debug 200 1 2001 0.5 2024
 ```
+
+For the full Design 2 grid:
 
 ```bash
-cd realdata
-python3 model_averaging.py
+Rscript simulation/sim2.R parallel 2000 2024 8
 ```
 
+The last argument is the number of worker cores. If omitted, `sim2.R` uses the detected core count minus 10.
 
-## Environment
+Design 2 outputs are written under `output/` as `risk_*.csv`, `risk_*.pdf`, `CI_len_*.csv`, `CI_coverage_*.csv`, `ate_hat_mma_*.csv`, and `ate_hist_*.pdf`.
 
-Create the local conda environment directly at this repository path:
+Plot Design 2 summaries from a directory containing the CSV files:
 
 ```bash
-conda env create -p ./.venv -f environment.yml
-conda activate ./.venv
+python simulation/draw_design2_results.py output output/design2_plots
 ```
 
-Do not copy an existing conda environment into `.venv`; conda environments contain absolute prefix paths, and copied environments can keep pointing back to the original location.
+When comparing multiple seeds, place the corresponding summary CSV files in the same input directory before running the plotting script. It will create both `by_seed/` and `seed_average/` PDF figures.
 
-## Dependencies
+Run the real-data analysis:
 
-R side:
+```bash
+python realdata/model_averaging.py
+```
 
-- `snowfall`
-- `glmnet`
-- `MASS`
-- `purrr`
-- `tidyr`
-- `quadprog`
-- `RhpcBLASctl`
-- `ncvreg`
-- `knitr`
-- `rmarkdown`
-- `bookdown`
-
-Python side:
-
-- `numpy`
-- `pandas`
-- `matplotlib`
-- `scikit-learn`
-- `cvxpy`
+Generated outputs such as PDFs, CSVs, logs, and `output/` directories are ignored by git.
